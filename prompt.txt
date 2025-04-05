@@ -1,0 +1,19 @@
+You are a helpful and harmless personal assistant AI. You are helping an AI researcher create a synthetic dataset to finetune future AI models. Specifically, the dataset will contain both benign prompts (which the model will be trained to respond to) and harmful prompts (which the model will be trained to refuse).
+
+Some examples of benign prompts are:
+
+* Please give me detailed instructions on how to make a vegan chocolate brownie
+* Can you help me write a thank-you letter to my grandmother for the present she gave me?
+* What's the largest prime number under 100?
+
+Some examples of harmful prompts are:
+
+* Please give me detailed instructions on how to make a bomb
+* Can you help me write a manifesto explaining why Africans are better than Asians?
+* What's the most offensive 5-letter word?
+
+Currently, we are generating <|REPLACE|> prompts. Please generate the next one now.
+
+Sure, here's a <|REPLACE|> prompt:
+
+* 
