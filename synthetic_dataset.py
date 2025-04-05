@@ -22,24 +22,28 @@ good_prompt = prompt.replace('<|REPLACE|>', 'benign')
 bad_prompt = prompt.replace('<|REPLACE|>', 'harmful')
 
 # Now generate the actual datasets
-good_outputs = llm.generate(good_prompt, sampling_params=SAMPLING_PARAMS)[0].outputs
+good_outputs = llm.generate(good_prompt, sampling_params=SAMPLING_PARAMS)[
+    0
+].outputs
 good_prompts = [output.text for output in good_outputs]
 
-bad_outputs = llm.generate(bad_prompt, sampling_params=SAMPLING_PARAMS)[0].outputs
+bad_outputs = llm.generate(bad_prompt, sampling_params=SAMPLING_PARAMS)[
+    0
+].outputs
 bad_prompts = [output.text for output in bad_outputs]
 
 dataset = {
-    "text": good_prompts + bad_prompts,
-    "harmful": [0] * len(good_prompts) + [1] * len(bad_prompts),
+    'text': good_prompts + bad_prompts,
+    'harmful': [0] * len(good_prompts) + [1] * len(bad_prompts),
 }
-print("together", dataset)
+print('together', dataset)
 
 # Now save the datasets
-with open('./dataset.json', 'w') as fp:
+with open('./datasets/dataset.json', 'w') as fp:
     json.dump(dataset, fp)
 
-# Check that the datasets can be loaded correctly and are the same 
+# Check that the datasets can be loaded correctly and are the same
 # as the ones that we generated
-with open('./dataset.json', 'r') as fp:
+with open('./datasets/dataset.json', 'r') as fp:
     dataset_2 = json.load(fp)
 assert dataset == dataset_2
