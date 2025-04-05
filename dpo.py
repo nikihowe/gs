@@ -22,28 +22,6 @@ model = AutoModelForCausalLM.from_pretrained(checkpoint).to(device)
 # TODO: stop truncating the dataset
 dataset = load_dataset('Unified-Language-Model-Alignment/Anthropic_HH_Golden')
 
-# TODO: remove datapoints that are too long
-# The majority of datapoints are <512 tokens, so to speed things up
-# we're just going to remove ones that are longer than that
-# tokenized_train_chosen = dataset.map(
-#     lambda x: tokenizer(x['chosen']),
-#     batched=True,
-# )
-# tokenized_train_rejected = dataset.map(
-#     lambda x: tokenizer(x['rejected']),
-#     batched=True,
-# )
-
-# print(f"before filter, there are {len(tokenized_train_chosen)} chosen examples")
-# print(f"before filter, there are {len(tokenized_train_rejected)} rejected examples")
-
-# dataset = tokenized_train_chosen.filter(lambda x: len(x['chosen']['input_ids']) < MAX_INPUT)
-# dataset = dataset.filter(lambda x: len(x['rejected']) < MAX_INPUT)
-
-# print("after filter, there are", len(dataset['train']), "examples")
-# print("of which", len(dataset['train']['chosen']), "were chosen")
-# print("and", len(dataset['train']['rejected']), "were rejected")a
-
 small_train = dataset['train'].select(range(100))
 small_test = dataset['test'].select(range(100))
 
@@ -62,22 +40,6 @@ tokenized_train_rejected = tokenized_train_rejected.remove_columns(['chosen'])
 # Print the first example
 eg_datapoint = tokenized_train_chosen[0]
 print("good", eg_datapoint)
-
-# Plot the distribution of input lengths
-# train_lengths = [len(x['input_ids']) for x in tokenized_train_chosen]
-# test_lengths = [len(x['input_ids']) for x in tokenized_train_rejected]
-
-# print("max train length", max(train_lengths))
-# print("max test length", max(test_lengths))
-
-# plt.hist(train_lengths, bins=50, alpha=0.5, label='Train')
-# plt.hist(test_lengths, bins=50, alpha=0.5, label='Test')
-# plt.xlabel('Input Length')
-# plt.ylabel('Frequency')
-# plt.title('Distribution of Input Lengths')
-# plt.legend()
-# plt.savefig('input_lengths.png')
-# What's the longest input?
 
 # Check the rejected examples
 eg_datapoint = tokenized_train_rejected[0]
