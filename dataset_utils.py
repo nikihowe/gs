@@ -47,6 +47,41 @@ def dpoify_dataset(dataset: Dataset) -> list[dict]:
     return Dataset.from_dict(new_dataset)
 
 
+def filter_too_long(dataset: Dataset, tokenizer: PreTrainedTokenizer, max_length: int) -> Dataset:
+    """
+    Filters the dataset to remove examples that are too long.
+
+    Args:
+        dataset (Dataset): The dataset to filter.
+        max_length (int): The maximum length of the examples.
+
+    Returns:
+        Dataset: The filtered dataset.
+    """
+    # Tokenize the dataset first
+    tokenized_chosen = dataset.map(lambda x: tokenizer(x['chosen']), batched=True)
+    tokenized_rejected = dataset.map(lambda x: tokenizer(x['rejected']), batched=True)
+    too_long_indices = []
+
+    # Add an index to the dataset so we know what to remove
+    dataset = dataset.add_column('idx', list(range(len(dataset['chosen']))))
+
+    for i, (chosen, rejected) in enumerate(
+        zip(tokenized_chosen['input_ids'], tokenized_rejected['input_ids'])
+    ):
+        if len(chosen) > max_length or len(rejected) > max_length:
+            too_long_indices.append(i)
+    print(
+        f'Found {len(too_long_indices)} examples that are too long, removing them'
+    )
+
+    dataset = dataset.filter(
+        lambda x: x['idx'] not in too_long_indices
+    )
+    dataset = dataset.remove_columns(['idx'])
+    return dataset
+
+
 def get_the_datasets(tokenizer: PreTrainedTokenizer, test: bool = False) -> tuple[Dataset, Dataset, Dataset]:
     if test:
         dset_type = "test"
@@ -64,13 +99,24 @@ def get_the_datasets(tokenizer: PreTrainedTokenizer, test: bool = False) -> tupl
         dataset = load_dataset(
             'Unified-Language-Model-Alignment/Anthropic_HH_Golden'
         )
+
+        print("originally, train dataset has", len(dataset['train']['chosen']), "examples")
+        print("originally, test dataset has", len(dataset['test']['chosen']), "examples")
+        dataset['train'] = filter_too_long(
+            dataset['train'], tokenizer, TIME_SIZE - 10  # buffer for retokenization
+        )
+        dataset['test'] = filter_too_long(
+            dataset['test'], tokenizer, TIME_SIZE - 10  # buffer for retokenization
+        )
+        print("now train dataset has", len(dataset['train']['chosen']), "examples")
+        print("now test dataset has", len(dataset['test']['chosen']), "examples")
+
         dpoified_dataset = dpoify_dataset(dataset[dset_type])
 
         # print('first datapoint', dpoified_dataset[0])
         # print('second datapoint', dpoified_dataset[1])
 
-        # TODO: remove this
-        small = dpoified_dataset#.select(range(100))
+        small = dpoified_dataset
 
         tokenized_prompt = small.map(
             lambda x: tokenizer(
