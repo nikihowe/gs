@@ -16,11 +16,11 @@ https://github.com/0xallam/Direct-Preference-Optimization/blob/main/src/train.py
 
 
 EPOCHS = 8
-MINIBATCH_SIZE = 4  # TODO: consider raising or adding accumulation
+MINIBATCH_SIZE = 2
 BATCH_SIZE = 16
 BATCHES_PER_EPOCH = 8
 ACCUMULATION_STEPS = BATCH_SIZE // MINIBATCH_SIZE
-LEARNING_RATE = 1e-5
+LEARNING_RATE = 5e-6
 BETA = 0.5  # DPO beta parameter
 
 
@@ -184,5 +184,9 @@ for param, ref_param in zip(ref_model.parameters(), ref_ref_model.parameters()):
     assert torch.allclose(param, ref_param)
 
 print("done!")
+
+
+# Save the trained model
+model.save_pretrained('dpo_model')
 
 ### COPILOT AUTOCOMPLETED ENDING HERE
