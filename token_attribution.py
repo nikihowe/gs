@@ -9,8 +9,8 @@ from constants import ACCEPTANCE, REJECTION
 # ------------------------------------------------------------------------------------------------
 # Token attribution. You need to implement this
 # ------------------------------------------------------------------------------------------------
-device = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"Using device: {device}")
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+print(f'Using device: {device}')
 
 
 def token_attribution(
@@ -37,12 +37,37 @@ def token_attribution(
     model.eval()
 
     # Tokenize the prompt and completion
-    prompt_tokens = tokenizer(prompt, return_tensors="pt").to(device)
+    prompt_tokens = tokenizer(prompt, return_tensors='pt').to(device)
     prompt_length = prompt_tokens.input_ids.shape[1]
-    completion_tokens = tokenizer(completion, return_tensors="pt").to(device)
+    completion_tokens = tokenizer(completion, return_tensors='pt').to(device)
+
+    # LLM WRITTEN
+    # First, get the baseline probability of the completion with the full prompt
+    with torch.no_grad():
+        full_input_ids = torch.cat(
+            (prompt_tokens.input_ids, completion_tokens.input_ids), dim=1
+        )
+        full_att_mask = torch.cat(
+            (prompt_tokens.attention_mask, completion_tokens.attention_mask),
+            dim=1,
+        )
+        outputs = model(
+            input_ids=full_input_ids,
+            attention_mask=full_att_mask,
+            return_dict=True,
+        )
+        logits_BTV = outputs.logits
+
+    # Calculate baseline completion probability
+    completion_logits = logits_BTV[:, prompt_length:, :]
+    completion_probs = torch.softmax(completion_logits, dim=-1)
+    completion_token_probs = completion_probs.gather(
+        2, completion_tokens.input_ids.unsqueeze(-1)
+    ).squeeze(-1)
+    baseline_prob = torch.log(completion_token_probs).mean().item()
+    # END LLM WRITTEN
 
     # Now we loop over the different prompt tokens and look at the output probs
-
     attribution_scores = []
     for i in range(prompt_tokens.input_ids.shape[1]):
         # Mask out the i-th token in the prompt
@@ -50,11 +75,17 @@ def token_attribution(
         # and setting the attention mask to 0 for that token
         masked_prompt_input_ids_BT = prompt_tokens.input_ids.clone().to(device)
         masked_prompt_input_ids_BT[:, i] = tokenizer.pad_token_id
-        masked_prompt_att_mask_BT = prompt_tokens.attention_mask.clone().to(device)
+        masked_prompt_att_mask_BT = prompt_tokens.attention_mask.clone().to(
+            device
+        )
         masked_prompt_att_mask_BT[:, i] = 0
 
-        masked_completion_input_ids_BT = completion_tokens.input_ids.clone().to(device)
-        masked_completion_att_mask_BT = completion_tokens.attention_mask.clone().to(device)
+        masked_completion_input_ids_BT = (
+            completion_tokens.input_ids.clone().to(device)
+        )
+        masked_completion_att_mask_BT = (
+            completion_tokens.attention_mask.clone().to(device)
+        )
 
         full_input_ids_BT = torch.cat(
             (masked_prompt_input_ids_BT, masked_completion_input_ids_BT), dim=1
@@ -112,10 +143,10 @@ def visualize_attribution(
     tokens_with_attributions: list[tuple[str, float]],
     max_attr: float,
 ) -> str:
-    colored_text = ""
+    colored_text = ''
     for token, attribution in tokens_with_attributions:
         # Skip special tokens
-        if token.startswith("<") and token.endswith(">"):
+        if token.startswith('<') and token.endswith('>'):
             continue
 
         # Normalize attribution value (0-1 scale)
@@ -128,9 +159,9 @@ def visualize_attribution(
             color = Fore.GREEN  # Low importance
 
         # Add space before token if needed
-        if token.startswith("Ġ"):
-            token = " " + token[1:]
-        colored_text += f"{color}{token}{Style.RESET_ALL}"
+        if token.startswith('Ġ'):
+            token = ' ' + token[1:]
+        colored_text += f'{color}{token}{Style.RESET_ALL}'
     return colored_text
 
 
@@ -139,7 +170,9 @@ def create_attribution_display(model, tokenizer):
     def attribution_modifier(prompt, completion):
         # Colorize prompt tokens based on attribution scores
         completion_text = completion[len(prompt) :]
-        attribution = token_attribution(model, tokenizer, prompt, completion_text)
+        attribution = token_attribution(
+            model, tokenizer, prompt, completion_text
+        )
         max_attr = max(attr for _, attr in attribution)
         colored_text = visualize_attribution(attribution, max_attr)
         return colored_text + completion_text
@@ -147,14 +180,17 @@ def create_attribution_display(model, tokenizer):
     return attribution_modifier
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     # Load the models and tokenizer
     checkpoint = 'HuggingFaceTB/SmolLM2-135M-Instruct'
+    # checkpoint = 'HuggingFaceTB/SmolLM2-1.7B-Instruct'
     tokenizer = AutoTokenizer.from_pretrained(checkpoint)
     base_model = AutoModelForCausalLM.from_pretrained(checkpoint).to(device)
 
-    trained_model_path = "dpo_model"
-    trained_model = AutoModelForCausalLM.from_pretrained(trained_model_path).to(device)
+    trained_model_path = 'dpo_model'
+    trained_model = AutoModelForCausalLM.from_pretrained(
+        trained_model_path
+    ).to(device)
 
     # Make sure the trained model is in fact different from the base model
     assert trained_model != base_model
@@ -166,43 +202,86 @@ if __name__ == "__main__":
     for param in base_model.parameters():
         param.requires_grad = False
 
-    base_attribution_modifier = create_attribution_display(base_model, tokenizer)
-    tuned_attribution_modifier = create_attribution_display(trained_model, tokenizer)
+    base_attribution_modifier = create_attribution_display(
+        base_model, tokenizer
+    )
+    tuned_attribution_modifier = create_attribution_display(
+        trained_model, tokenizer
+    )
 
     # Load the synthetic dataset
     with open('./datasets/dataset.json', 'r') as fp:
         dataset = json.load(fp)
-    
-    print("Loaded dataset with", len(dataset['text']), "examples")
+
+    print('Loaded dataset with', len(dataset['text']), 'examples')
     # Split the dataset into good and bad examples
-    good_examples = [text for text, label in zip(dataset['text'], dataset['harmful']) if label == 1]
-    good_examples = ["Human: " + text + " Assistant: " for text in good_examples]
-    bad_examples = [text for text, label in zip(dataset['text'], dataset['harmful']) if label == 1]
-    bad_examples = ["Human: " + text + " Assistant: " for text in bad_examples]
+    good_examples = [
+        text
+        for text, label in zip(dataset['text'], dataset['harmful'])
+        if label == 1
+    ]
+    good_examples = [
+        'Human: ' + text + ' Assistant: ' for text in good_examples
+    ]
+    bad_examples = [
+        text
+        for text, label in zip(dataset['text'], dataset['harmful'])
+        if label == 1
+    ]
+    bad_examples = ['Human: ' + text + ' Assistant: ' for text in bad_examples]
 
     for i in range(5):
         base_model_response = base_model.generate(
-            input_ids=tokenizer(good_examples[i], return_tensors="pt").input_ids.to(device),
-            attention_mask=tokenizer(good_examples[i], return_tensors="pt").attention_mask.to(device),
+            input_ids=tokenizer(
+                good_examples[i], return_tensors='pt'
+            ).input_ids.to(device),
+            attention_mask=tokenizer(
+                good_examples[i], return_tensors='pt'
+            ).attention_mask.to(device),
             max_length=50,
             num_return_sequences=1,
         )
-        base_model_response = tokenizer.decode(base_model_response[0], skip_special_tokens=True)
-        print("Base model response:", base_model_response)
+        base_model_response = tokenizer.decode(
+            base_model_response[0], skip_special_tokens=True
+        )
+        # print("Base model response:", base_model_response)
 
         tuned_model_response = trained_model.generate(
-            input_ids=tokenizer(good_examples[i], return_tensors="pt").input_ids.to(device),
-            attention_mask=tokenizer(good_examples[i], return_tensors="pt").attention_mask.to(device),
+            input_ids=tokenizer(
+                good_examples[i], return_tensors='pt'
+            ).input_ids.to(device),
+            attention_mask=tokenizer(
+                good_examples[i], return_tensors='pt'
+            ).attention_mask.to(device),
             max_length=50,
             num_return_sequences=1,
         )
-        tuned_model_response = tokenizer.decode(tuned_model_response[0], skip_special_tokens=True)
-        print("Tuned model response:", tuned_model_response)
+        tuned_model_response = tokenizer.decode(
+            tuned_model_response[0], skip_special_tokens=True
+        )
+        # print("Tuned model response:", tuned_model_response)
 
-        base_model_good_attribution = token_attribution(base_model, tokenizer, good_examples[i], base_model_response)
-        tuned_model_good_attribution = token_attribution(trained_model, tokenizer, good_examples[i], tuned_model_response)
-        print("Base model good attribution:", base_model_good_attribution)
-        print("Tuned model good attribution:", tuned_model_good_attribution)
-        print("Base model good attribution visualization:", visualize_attribution(base_model_good_attribution, max_attr=1.0))
-        print("Tuned model good attribution visualization:", visualize_attribution(tuned_model_good_attribution, max_attr=1.0))
-        
+        base_model_good_attribution = token_attribution(
+            base_model, tokenizer, good_examples[i], base_model_response
+        )
+        tuned_model_good_attribution = token_attribution(
+            trained_model, tokenizer, good_examples[i], tuned_model_response
+        )
+        # print("Base model good attribution:", base_model_good_attribution)
+        # print("Tuned model good attribution:", tuned_model_good_attribution)
+
+        max_good_attr = max(attr for _, attr in base_model_good_attribution)
+        max_bad_attr = max(attr for _, attr in tuned_model_good_attribution)
+
+        print(
+            'Base model good attribution visualization:',
+            visualize_attribution(
+                base_model_good_attribution, max_attr=max_good_attr
+            ),
+        )
+        print(
+            'Tuned model good attribution visualization:',
+            visualize_attribution(
+                tuned_model_good_attribution, max_attr=max_bad_attr
+            ),
+        )

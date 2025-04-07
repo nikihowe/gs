@@ -5,7 +5,11 @@ from constants import TIME_SIZE
 
 ### GENERATED AND THEN MODIFIED CODE
 def get_minibatch(
-    prompt: Dataset, chosen: Dataset, rejected: Dataset, minibatch_size: int, device: str
+    prompt: Dataset,
+    chosen: Dataset,
+    rejected: Dataset,
+    minibatch_size: int,
+    device: str,
 ) -> dict[str, torch.Tensor]:
     """
     Get a minibatch of data from the chosen and rejected datasets.
@@ -31,15 +35,24 @@ def get_minibatch(
 
     minibatch = {
         'prompt_input_ids': torch.tensor(prompt_batch['input_ids']).to(device),
-        'prompt_attention_mask': torch.tensor(prompt_batch['attention_mask']).to(device),
+        'prompt_attention_mask': torch.tensor(
+            prompt_batch['attention_mask']
+        ).to(device),
         'chosen_input_ids': torch.tensor(chosen_batch['input_ids']).to(device),
-        'chosen_attention_mask': torch.tensor(chosen_batch['attention_mask']).to(device),
-        'rejected_input_ids': torch.tensor(rejected_batch['input_ids']).to(device),
-        'rejected_attention_mask': torch.tensor(rejected_batch['attention_mask']).to(device),
+        'chosen_attention_mask': torch.tensor(
+            chosen_batch['attention_mask']
+        ).to(device),
+        'rejected_input_ids': torch.tensor(rejected_batch['input_ids']).to(
+            device
+        ),
+        'rejected_attention_mask': torch.tensor(
+            rejected_batch['attention_mask']
+        ).to(device),
     }
     for v in minibatch.values():
         assert v.shape == (minibatch_size, TIME_SIZE)
 
     return minibatch
+
 
 ### END GENERATED CODE

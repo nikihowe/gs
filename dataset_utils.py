@@ -13,7 +13,7 @@ def extract_prompt_and_response(example: str) -> Dataset:
     assert assistant_start_idx != -1, 'No Assistant found in the example'
 
     return (
-        example[:assistant_start_idx + len(match_string)],
+        example[: assistant_start_idx + len(match_string)],
         example[assistant_start_idx + len(match_string) :],
     )
 
@@ -47,7 +47,9 @@ def dpoify_dataset(dataset: Dataset) -> list[dict]:
     return Dataset.from_dict(new_dataset)
 
 
-def filter_too_long(dataset: Dataset, tokenizer: PreTrainedTokenizer, max_length: int) -> Dataset:
+def filter_too_long(
+    dataset: Dataset, tokenizer: PreTrainedTokenizer, max_length: int
+) -> Dataset:
     """
     Filters the dataset to remove examples that are too long.
 
@@ -59,8 +61,12 @@ def filter_too_long(dataset: Dataset, tokenizer: PreTrainedTokenizer, max_length
         Dataset: The filtered dataset.
     """
     # Tokenize the dataset first
-    tokenized_chosen = dataset.map(lambda x: tokenizer(x['chosen']), batched=True)
-    tokenized_rejected = dataset.map(lambda x: tokenizer(x['rejected']), batched=True)
+    tokenized_chosen = dataset.map(
+        lambda x: tokenizer(x['chosen']), batched=True
+    )
+    tokenized_rejected = dataset.map(
+        lambda x: tokenizer(x['rejected']), batched=True
+    )
     too_long_indices = []
 
     # Add an index to the dataset so we know what to remove
@@ -75,18 +81,18 @@ def filter_too_long(dataset: Dataset, tokenizer: PreTrainedTokenizer, max_length
         f'Found {len(too_long_indices)} examples that are too long, removing them'
     )
 
-    dataset = dataset.filter(
-        lambda x: x['idx'] not in too_long_indices
-    )
+    dataset = dataset.filter(lambda x: x['idx'] not in too_long_indices)
     dataset = dataset.remove_columns(['idx'])
     return dataset
 
 
-def get_the_datasets(tokenizer: PreTrainedTokenizer, test: bool = False) -> tuple[Dataset, Dataset, Dataset]:
+def get_the_datasets(
+    tokenizer: PreTrainedTokenizer, test: bool = False
+) -> tuple[Dataset, Dataset, Dataset]:
     if test:
-        dset_type = "test"
+        dset_type = 'test'
     else:
-        dset_type = "train"
+        dset_type = 'train'
     try:
         tokenized_prompt = load_from_disk(f'tokenized_{dset_type}_prompt')
         tokenized_chosen = load_from_disk(f'tokenized_{dset_type}_chosen')
@@ -100,16 +106,34 @@ def get_the_datasets(tokenizer: PreTrainedTokenizer, test: bool = False) -> tupl
             'Unified-Language-Model-Alignment/Anthropic_HH_Golden'
         )
 
-        print("originally, train dataset has", len(dataset['train']['chosen']), "examples")
-        print("originally, test dataset has", len(dataset['test']['chosen']), "examples")
+        print(
+            'originally, train dataset has',
+            len(dataset['train']['chosen']),
+            'examples',
+        )
+        print(
+            'originally, test dataset has',
+            len(dataset['test']['chosen']),
+            'examples',
+        )
         dataset['train'] = filter_too_long(
-            dataset['train'], tokenizer, TIME_SIZE - 10  # buffer for retokenization
+            dataset['train'],
+            tokenizer,
+            TIME_SIZE - 10,  # buffer for retokenization
         )
         dataset['test'] = filter_too_long(
-            dataset['test'], tokenizer, TIME_SIZE - 10  # buffer for retokenization
+            dataset['test'],
+            tokenizer,
+            TIME_SIZE - 10,  # buffer for retokenization
         )
-        print("now train dataset has", len(dataset['train']['chosen']), "examples")
-        print("now test dataset has", len(dataset['test']['chosen']), "examples")
+        print(
+            'now train dataset has',
+            len(dataset['train']['chosen']),
+            'examples',
+        )
+        print(
+            'now test dataset has', len(dataset['test']['chosen']), 'examples'
+        )
 
         dpoified_dataset = dpoify_dataset(dataset[dset_type])
 
@@ -161,7 +185,7 @@ def get_the_datasets(tokenizer: PreTrainedTokenizer, test: bool = False) -> tupl
         tokenized_chosen.save_to_disk(f'tokenized_{dset_type}_chosen')
         tokenized_rejected.save_to_disk(f'tokenized_{dset_type}_rejected')
 
-    print(f"the {dset_type} dataset has {len(tokenized_prompt)} examples")
+    print(f'the {dset_type} dataset has {len(tokenized_prompt)} examples')
     return (
         tokenized_prompt,
         tokenized_chosen,
