@@ -190,6 +190,9 @@ def extract_log_probs(
     shifted_labels = labels[:, 1:]
     batch_size, seq_len_shifted, vocab_size = shifted_logits.shape
 
+    if torch.isnan(shifted_logits).any() or torch.isinf(shifted_logits).any():
+        print(f"!!! WARNING: NaN/Inf detected in shifted_logits BEFORE log_softmax at step {global_step} !!!")
+
     log_probs_all = F.log_softmax(shifted_logits, dim=-1)
     gathered_log_probs = torch.gather(
         log_probs_all, 2, shifted_labels.unsqueeze(-1)
@@ -260,6 +263,18 @@ def dpo_loss_function(
     ref_logratios = ref_chosen_logprobs - ref_rejected_logprobs
 
     logits = pi_logratios - ref_logratios
+
+    # --- Add Debug Prints ---
+    # Check only occasionally or if NaNs occur to avoid spamming logs
+    if torch.isnan(logits).any() or torch.isinf(logits).any() or global_step % 50 == 0: # Example condition
+        print(f"\n--- Debug DPO Loss Inputs (Step {global_step}) ---")
+        print(f"Policy Chosen Logprobs: min={policy_chosen_logprobs.min().item():.4f}, max={policy_chosen_logprobs.max().item():.4f}")
+        print(f"Policy Rejected Logprobs: min={policy_rejected_logprobs.min().item():.4f}, max={policy_rejected_logprobs.max().item():.4f}")
+        print(f"Ref Chosen Logprobs: min={ref_chosen_logprobs.min().item():.4f}, max={ref_chosen_logprobs.max().item():.4f}")
+        print(f"Ref Rejected Logprobs: min={ref_rejected_logprobs.min().item():.4f}, max={ref_rejected_logprobs.max().item():.4f}")
+        print(f"Logits (pi_lr - ref_lr): min={logits.min().item():.4f}, max={logits.max().item():.4f}")
+    # --- End Debug Prints ---
+
     # The loss is the negative log-likelihood of the policy accurately classifying the chosen answer as better
     # Uses the Bradley-Terry model probability P(chosen > rejected) = sigmoid(beta * (log_pi(chosen)/ref(chosen) - log_pi(rejected)/ref(rejected)))
     loss = -F.logsigmoid(beta * logits).mean()   # Average loss over the batch
