@@ -4,21 +4,23 @@ import os
 from datasets import Dataset, load_dataset, load_from_disk
 from transformers import PreTrainedTokenizer
 
+# ... (keep extract_prompt_and_response, dpoify_dataset, filter_dpo_dataset_by_response_length functions exactly as they were) ...
+
 # Helper function to extract prompt and response from HH format
 def extract_prompt_and_response(example: str) -> tuple[str, str]:
     """Extracts prompt and response assuming HH format."""
     match_string = '\n\nAssistant: '
     assistant_start_idx = example.rfind(match_string)
     if assistant_start_idx == -1 or assistant_start_idx == 0:
-        print(
-            f"Warning: Could not find '{match_string}' properly in example: {example[:100]}..."
-        )
+        # print( # Commented out excessive warning
+        #     f"Warning: Could not find '{match_string}' properly in example: {example[:100]}..."
+        # )
         if assistant_start_idx == -1:
-            return example, ''   # Treat as prompt? Or handle differently?
+            return example, ''  # Treat as prompt? Or handle differently?
         return (
             match_string,
             example[len(match_string) :],
-        )   # No prompt, just response
+        )  # No prompt, just response
     return (
         example[: assistant_start_idx + len(match_string)],
         example[assistant_start_idx + len(match_string) :],
@@ -54,10 +56,10 @@ def dpoify_dataset(dataset: Dataset) -> Dataset:
             new_dataset['prompt'].append(prompt)
             new_dataset['chosen'].append(
                 chosen_response
-            )   # Store only the response part
+            )  # Store only the response part
             new_dataset['rejected'].append(
                 rejected_response
-            )   # Store only the response part
+            )  # Store only the response part
         except Exception as e:
             # print(f"Error processing example during dpoify: {e}")
             num_errors += 1
@@ -137,16 +139,15 @@ def filter_dpo_dataset_by_response_length(
         )
     except Exception as e:
         print(
-            f'Warning: Error during filtering process: {e}. Returning unfiltered dataset.'
+            f'Warning: Error during filtering process: {e}. Trying with num_proc=1.'
         )
-        # Consider falling back to single-process filtering if multiprocessing fails
-        # try:
-        #     print("Retrying filtering with num_proc=1...")
-        #     filtered_dataset = dataset.filter(is_response_length_ok, num_proc=1)
-        # except Exception as e2:
-        #      print(f'Single-process filtering also failed: {e2}. Returning unfiltered.')
-        #      return dataset
-        return dataset # Return unfiltered on error for now
+        # Fallback to single-process filtering
+        try:
+            print("Retrying filtering with num_proc=1...")
+            filtered_dataset = dataset.filter(is_response_length_ok, num_proc=1)
+        except Exception as e2:
+            print(f'Single-process filtering also failed: {e2}. Returning unfiltered.')
+            return dataset # Return unfiltered on error
 
     final_count = len(filtered_dataset)
     num_removed = initial_count - final_count
@@ -168,22 +169,29 @@ def get_the_datasets(
     max_length: int,  # Max length used for filtering logic buffer
     test: bool = False,
     force_reprocess: bool = False,  # Add option to force reprocessing
-    data_dir: str = '.',  # Base directory for saving/loading data
+    data_dir: str = '.',  # Base directory for *source* data or *persistent* cache (kept for potential future use)
+    # New argument for cache location, defaults to /tmp
+    processed_cache_base: str = '/tmp' # <--- ADDED ARGUMENT (or hardcode '/tmp')
 ) -> Dataset:
     """
     Loads/processes HH dataset into DPO format with 'prompt', 'chosen', 'rejected' text columns.
-    Handles caching of the processed text dataset. Tokenization happens later in collate_fn.
+    Handles caching of the processed text dataset in `processed_cache_base`.
+    Tokenization happens later in collate_fn.
     """
     dset_type = 'test' if test else 'train'
-    # Define path for the processed TEXT dataset relative to data_dir
+
+    # --- MODIFIED PATH DEFINITION ---
+    # Define path for the processed TEXT dataset within the specified cache base
     processed_text_save_path = os.path.join(
-        data_dir, f'dpo_{dset_type}_text_dataset'
+        processed_cache_base, f'dpo_{dset_type}_text_dataset_ml{max_length}' # Added max_length to name
     )
+    print(f"Using processed dataset cache path: {processed_text_save_path}")
+    # --- END MODIFICATION ---
 
     if not force_reprocess:
         try:
+            # The logic remains the same, just the path variable is different
             if os.path.exists(processed_text_save_path):
-                # Try loading the dataset with text columns
                 dpo_text_dataset = load_from_disk(processed_text_save_path)
                 print(
                     f'Loaded processed {dset_type} TEXT dataset from disk: {processed_text_save_path}'
@@ -196,9 +204,7 @@ def get_the_datasets(
                     print(
                         "Warning: Loaded dataset missing required columns ('prompt', 'chosen', 'rejected'). Reprocessing."
                     )
-                    raise ValueError(
-                        'Loaded dataset format incorrect.'
-                    )   # Trigger reprocessing
+                    raise ValueError('Loaded dataset format incorrect.')
                 print(
                     f'Final {dset_type} dataset has {len(dpo_text_dataset)} examples'
                 )
@@ -216,15 +222,17 @@ def get_the_datasets(
     print('Processing original dataset...')
     # --- Load Raw Data ---
     try:
-        # Consider adding cache_dir argument if needed
+        # Specify cache_dir for huggingface datasets download if desired (separate from processed cache)
+        # hf_cache_dir = os.path.join(data_dir, 'hf_cache')
+        # os.makedirs(hf_cache_dir, exist_ok=True)
         dataset = load_dataset(
-            'Unified-Language-Model-Alignment/Anthropic_HH_Golden'
+            'Unified-Language-Model-Alignment/Anthropic_HH_Golden',
+            # cache_dir=hf_cache_dir # Optional: Control where HF downloads/caches raw data
         )
         raw_dset = dataset[dset_type]
         print(f'Original {dset_type} dataset has {len(raw_dset)} examples')
     except Exception as e:
         print(f"ERROR: Failed to load raw dataset 'Anthropic_HH_Golden': {e}")
-        # Depending on use case, maybe return empty Dataset or raise error
         raise ValueError(f'Could not load raw data for {dset_type}') from e
 
     # --- DPO-ify ---
@@ -234,13 +242,10 @@ def get_the_datasets(
         print(
             f'Warning: DPOification resulted in empty {dset_type} dataset. Check source data and extraction logic.'
         )
-        # Return the empty dataset, subsequent steps should handle it gracefully
-        return dpo_text_dataset
+        return dpo_text_dataset # Return empty
 
     # --- Filtering based on DPO format (Now Active) ---
-    # Calculate a max length for *responses only* based on the overall max_length
-    # Reserve some tokens for the prompt (e.g., 10 or a percentage)
-    prompt_buffer = 10
+    prompt_buffer = 10 # Consider making this dynamic or an argument
     filter_max_response_len = max_length - prompt_buffer
     print(
         f'Calculated max response length for filtering: {filter_max_response_len} (max_length={max_length}, buffer={prompt_buffer})'
@@ -248,7 +253,7 @@ def get_the_datasets(
 
     if filter_max_response_len <= 0:
         print(
-            'Warning: max_length is too small for filtering buffer (<= {prompt_buffer}). Skipping response length filtering.'
+            f'Warning: max_length ({max_length}) is too small for filtering buffer (<= {prompt_buffer}). Skipping response length filtering.'
         )
     else:
         dpo_text_dataset = filter_dpo_dataset_by_response_length(
@@ -264,19 +269,34 @@ def get_the_datasets(
         print(
             f'Warning: Dataset became empty after filtering for {dset_type}. Check data and filtering criteria.'
         )
-        # Return empty dataset
+        # Return empty dataset - Don't try to save an empty one
 
     # --- Save the processed TEXT dataset ---
-    print(
-        f'Saving processed {dset_type} TEXT dataset to disk: {processed_text_save_path}...'
-    )
-    try:
-        # Ensure parent directory exists
-        os.makedirs(os.path.dirname(processed_text_save_path), exist_ok=True)
-        dpo_text_dataset.save_to_disk(processed_text_save_path)
-        print('Dataset saved successfully.')
-    except Exception as e:
-        print(f'Error saving processed dataset: {e}')
+    # Only save if the dataset is not empty
+    if len(dpo_text_dataset) > 0:
+        print(
+            f'Saving processed {dset_type} TEXT dataset to disk: {processed_text_save_path}...'
+        )
+        try:
+            # Ensure parent directory exists (e.g., /tmp/ might exist but maybe not /tmp/some_subdir/)
+            os.makedirs(os.path.dirname(processed_text_save_path), exist_ok=True)
+            # Save using the new path
+            dpo_text_dataset.save_to_disk(processed_text_save_path)
+            print('Dataset saved successfully.')
+        except Exception as e:
+            print(f'Error saving processed dataset to {processed_text_save_path}: {e}')
+            # Decide if you want to raise the error or just continue without saving
+            # raise e # Uncomment if saving failure should stop the process
+    elif not force_reprocess and os.path.exists(processed_text_save_path):
+         # If we ended up with an empty dataset after processing, but a cached one exists
+         # (and we didn't force reprocess), maybe remove the invalid cache? Optional.
+         try:
+             print(f"Attempting to remove potentially invalid empty cache: {processed_text_save_path}")
+             import shutil
+             shutil.rmtree(processed_text_save_path)
+         except Exception as e_rm:
+             print(f"Warning: Failed to remove empty cache directory {processed_text_save_path}: {e_rm}")
+
 
     print(f'Final {dset_type} dataset has {len(dpo_text_dataset)} examples')
     # Return the dataset that has 'prompt', 'chosen', 'rejected' text columns
