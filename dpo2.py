@@ -14,7 +14,7 @@ from dataset_utils2 import get_the_datasets # Removed dpoify_dataset, filter_too
 
 # --- Hyperparameters ---
 EPOCHS = 1  # Start with 1 epoch, see if we need more
-MINIBATCH_SIZE = 4   # Per device batch size (DataLoader batch size)
+MINIBATCH_SIZE = 2   # Per device batch size (DataLoader batch size)
 BATCH_SIZE = 32      # Effective batch size after gradient accumulation
 ACCUMULATION_STEPS = BATCH_SIZE // MINIBATCH_SIZE
 # BATCHES_PER_EPOCH = 8 # <<<--- REMOVED: Determined by DataLoader
@@ -349,7 +349,7 @@ for epoch in range(EPOCHS):
         # Check if we have processed enough microbatches for one optimizer step
         if microbatch_step % ACCUMULATION_STEPS == 0:
             # Optional: Gradient clipping (prevents exploding gradients)
-            # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
             optimizer.step()    # Update model weights
             optimizer.zero_grad() # Clear gradients for the next accumulation cycle
@@ -416,34 +416,30 @@ for epoch in range(EPOCHS):
                         )
 
                         if not torch.isnan(eval_loss): # Skip NaN eval losses
-                            # Accumulate metrics only if loss is valid
-                            total_eval_loss += eval_loss.item() * val_microbatch_size
+                            # Accumulate loss weighted by samples
+                            # Accumulate reward stats for validation set
                             total_eval_chosen_rewards += eval_chosen_rewards.sum().item()
                             total_eval_rejected_rewards += eval_rejected_rewards.sum().item()
                             total_eval_accurate_samples += (eval_chosen_rewards > eval_rejected_rewards).sum().item()
-                            total_eval_samples += val_microbatch_size # Increment count *after* successful processing
+                            total_eval_samples += val_microbatch_size
                         else:
-                            print("Warning: NaN detected in validation loss for a batch.")
-                            # Optionally decide if you want to count these samples or not.
-                            # Current logic doesn't count them in total_eval_samples if loss is NaN.
+                            print("Warning: NaN detected in validation loss.")
 
-                # --- Calculation and Reporting (runs after the loop, possibly broken early) ---
+                # Calculate and print average validation metrics
                 if total_eval_samples > 0:
                     avg_eval_loss = total_eval_loss / total_eval_samples
                     avg_eval_chosen_reward = total_eval_chosen_rewards / total_eval_samples
                     avg_eval_rejected_reward = total_eval_rejected_rewards / total_eval_samples
                     avg_eval_reward_acc = total_eval_accurate_samples / total_eval_samples
 
-                    print(f"--- Validation Complete (on {total_eval_samples} samples) ---")
+                    print(f"--- Validation Complete ---")
                     print(f"[VAL] Step: {global_step}, Avg Loss: {avg_eval_loss:.4f}, "
                           f"Avg Chosen Reward: {avg_eval_chosen_reward:.3f}, "
                           f"Avg Rejected Reward: {avg_eval_rejected_reward:.3f}, "
                           f"Reward Acc: {avg_eval_reward_acc:.3f}")
-                    # Add early stopping logic here based on these subset metrics if desired
+                    # Add early stopping logic here based on avg_eval_loss or avg_eval_reward_acc if desired
                 else:
-                    # This case now means either the val_dataloader was empty,
-                    # MAX_EVAL_SAMPLES was 0, or all processed batches resulted in NaN loss.
-                    print(f"--- Validation Warning: No valid samples processed (processed {total_eval_samples} samples) ---")
+                    print("--- Validation Warning: No valid samples processed (all losses might have been NaN) ---")
 
                 model.train() # Set back to training mode before continuing training loop
             # <<<--- END OF MODIFIED VALIDATION SECTION --->>>
