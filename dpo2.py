@@ -28,7 +28,7 @@ MINIBATCH_SIZE = 16   # Per device batch size (DataLoader batch size)
 BATCH_SIZE = 32      # Effective batch size after gradient accumulation
 ACCUMULATION_STEPS = BATCH_SIZE // MINIBATCH_SIZE
 # BATCHES_PER_EPOCH = 8 # <<<--- REMOVED: Determined by DataLoader
-LEARNING_RATE = 1e-5
+LEARNING_RATE = 1e-6
 BETA = 0.1
 EVAL_STEPS = 100     # Evaluate validation loss every N optimizer steps
 MAX_EVAL_SAMPLES = 300
@@ -190,6 +190,16 @@ def extract_log_probs(
     shifted_labels = labels[:, 1:]
     batch_size, seq_len_shifted, vocab_size = shifted_logits.shape
 
+    # --- Add Debug Prints for Ranges ---
+    # Check only occasionally to avoid too much log spam
+    if global_step % 20 == 0 or global_step < 5: # Check frequently early on
+         print(f"\n--- Debug LogProb Ranges (Step {global_step}) ---")
+         if not torch.isnan(shifted_logits).any() and not torch.isinf(shifted_logits).any():
+             print(f"shifted_logits: min={shifted_logits.min().item():.4f}, max={shifted_logits.max().item():.4f}")
+         else:
+             print("!!! shifted_logits contains NaN/Inf !!!") # Should trigger the earlier check too
+    # --- End Debug Prints ---
+
     if torch.isnan(shifted_logits).any() or torch.isinf(shifted_logits).any():
         print(f"!!! WARNING: NaN/Inf detected in shifted_logits BEFORE log_softmax at step {global_step} !!!")
 
@@ -220,6 +230,15 @@ def extract_log_probs(
     num_completion_tokens_B = valid_completion_indices_shifted.sum(
         dim=-1
     ).float()
+
+    # --- Add Debug Prints for Ranges ---
+    if global_step % 20 == 0 or global_step < 5:
+         print(f"num_completion_tokens_B: min={num_completion_tokens_B.min().item():.1f}, max={num_completion_tokens_B.max().item():.1f}")
+         if not torch.isnan(sum_log_probs_B).any() and not torch.isinf(sum_log_probs_B).any():
+             print(f"sum_log_probs_B: min={sum_log_probs_B.min().item():.4f}, max={sum_log_probs_B.max().item():.4f}")
+         else:
+             print("!!! sum_log_probs_B contains NaN/Inf !!!")
+    # --- End Debug Prints ---
 
     mean_log_probs_B = torch.where(
         num_completion_tokens_B > 0,
@@ -262,7 +281,9 @@ def dpo_loss_function(
     pi_logratios = policy_chosen_logprobs - policy_rejected_logprobs
     ref_logratios = ref_chosen_logprobs - ref_rejected_logprobs
 
-    logits = pi_logratios - ref_logratios
+    logits = pi_logratios - ref_logratios    
+    logits.requires_grad_(True) # Ensure grad is tracked for debugging
+
 
     # --- Add Debug Prints ---
     # Check only occasionally or if NaNs occur to avoid spamming logs
@@ -278,6 +299,8 @@ def dpo_loss_function(
     # The loss is the negative log-likelihood of the policy accurately classifying the chosen answer as better
     # Uses the Bradley-Terry model probability P(chosen > rejected) = sigmoid(beta * (log_pi(chosen)/ref(chosen) - log_pi(rejected)/ref(rejected)))
     loss = -F.logsigmoid(beta * logits).mean()   # Average loss over the batch
+    # loss = (beta * logits).mean() # Test 1: Linear loss
+
 
     # Calculate rewards for logging purposes (detached from the graph)
     chosen_rewards = (
@@ -514,14 +537,27 @@ for epoch in range(EPOCHS):
         accumulated_samples += current_microbatch_size
 
         # --- Backward Pass ---
-        scaled_loss.backward()
+        scaled_loss.backward(retain_graph=False)
+
+            # --- Check Gradients BEFORE optimizer step ---
+        # if batch_logits.grad is not None:
+        #     if torch.isnan(batch_logits.grad).any() or torch.isinf(batch_logits.grad).any():
+        #         print(f"\n!!! WARNING: NaN/Inf detected in batch_logits.grad at step {global_step} !!!")
+        #         print(f"Gradient min: {batch_logits.grad.min().item()}, max: {batch_logits.grad.max().item()}")
+        #         # Potentially add more checks here, e.g., check policy_chosen_logprobs.grad if retained
+        #         # CRITICAL: Consider stopping or adding more detailed debugging if NaN grad detected
+        #         # Depending on your setup, policy_chosen_logprobs might not retain grad unless explicitly told to.
+        # else:
+        #     print(f"\n--- WARNING: batch_logits.grad is None at step {global_step}. Check graph retention? ---")
+
+
         microbatch_step += 1   # Increment after processing a microbatch
 
         # --- Optimizer Step ---
         # Check if we have processed enough microbatches for one optimizer step
         if microbatch_step % ACCUMULATION_STEPS == 0:
             # Optional: Gradient clipping (prevents exploding gradients)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
 
             optimizer.step()    # Update model weights
             optimizer.zero_grad()   # Clear gradients for the next accumulation cycle
