@@ -19,28 +19,33 @@ from dataset_utils2 import (
     get_the_datasets,
 )   # Removed dpoify_dataset, filter_too_long as they are internal to get_the_datasets
 
+torch.set_default_dtype(torch.float32)
+torch.autograd.set_detect_anomaly(True)   # Enable for debugging NaNs
+
 # --- Hyperparameters ---
 EPOCHS = 1  # Start with 1 epoch, see if we need more
-MINIBATCH_SIZE = 2   # Per device batch size (DataLoader batch size)
+MINIBATCH_SIZE = 16   # Per device batch size (DataLoader batch size)
 BATCH_SIZE = 32      # Effective batch size after gradient accumulation
 ACCUMULATION_STEPS = BATCH_SIZE // MINIBATCH_SIZE
 # BATCHES_PER_EPOCH = 8 # <<<--- REMOVED: Determined by DataLoader
-LEARNING_RATE = 2e-5
+LEARNING_RATE = 1e-5
 BETA = 0.1
 EVAL_STEPS = 100     # Evaluate validation loss every N optimizer steps
 MAX_EVAL_SAMPLES = 300
 MAX_LENGTH = 512     # Define a max sequence length for padding/truncation
 NUM_WORKERS = 4  # Number of workers for DataLoader (adjust based on system)
-LOG_INTERVAL = 10     # <<<--- MODIFIED: Log accumulated train loss every N optimizer steps
+LOG_INTERVAL = 2     # <<<--- MODIFIED: Log accumulated train loss every N optimizer steps
 
 # --- Setup ---
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(f'Using device: {device}')
 
 # Load the model and tokenizer
-# checkpoint = 'HuggingFaceTB/SmolLM2-135M-Instruct'
+# Try gpt2
+# checkpoint = 'gpt2'
+checkpoint = 'HuggingFaceTB/SmolLM2-135M-Instruct'
 # checkpoint = 'HuggingFaceTB/SmolLM2-360M-Instruct'
-checkpoint = 'HuggingFaceTB/SmolLM2-1.7B-Instruct'
+# checkpoint = 'HuggingFaceTB/SmolLM2-1.7B-Instruct'
 tokenizer = AutoTokenizer.from_pretrained(checkpoint)
 if tokenizer.pad_token is None:
     tokenizer.pad_token = (
@@ -122,12 +127,21 @@ def dpo_collate_fn(
 
 # --- Dataset Preparation ---
 print('Loading datasets...')
-# Assuming get_the_datasets returns Hugging Face Dataset objects
-# with 'prompt', 'chosen', 'rejected' text columns.
-# It should handle loading from disk / processing / filtering internally.
-hf_train_dataset = get_the_datasets(tokenizer, max_length=MAX_LENGTH)
+hf_train_dataset_full = get_the_datasets(tokenizer, max_length=MAX_LENGTH)
 hf_test_dataset = get_the_datasets(tokenizer, max_length=MAX_LENGTH, test=True)
-print('Datasets loaded.')
+print('Full datasets loaded.')
+
+
+# <<<--- ADD SUBSETTING LOGIC HERE --->>>
+train_subset_size = 10000 # Or 5000 or even 1000 for very quick tests
+# Make sure the dataset size is larger than the subset size
+if len(hf_train_dataset_full) > train_subset_size:
+    hf_train_dataset = hf_train_dataset_full.select(range(train_subset_size))
+    print(f"Using a subset of {train_subset_size} training examples.")
+else:
+    hf_train_dataset = hf_train_dataset_full # Use full dataset if it's smaller than desired subset
+    print(f"Using full training dataset ({len(hf_train_dataset)} examples).")
+# <<<--- END OF SUBSETTING LOGIC --->>>
 
 # --- Create DataLoaders ---
 collate_wrapper = partial(
@@ -214,8 +228,19 @@ def extract_log_probs(
         torch.isnan(mean_log_probs_B).any()
         or torch.isinf(mean_log_probs_B).any()
     ):
-        print('Warning: NaN or Inf detected in mean_log_probs_B!')
-        # Consider adding more debug info here if needed
+        print('--- DEBUG: NaN or Inf detected in mean_log_probs_B! ---')
+        problem_indices = torch.where(torch.isnan(mean_log_probs_B) | torch.isinf(mean_log_probs_B))[0]
+        print(f"Problematic indices in batch: {problem_indices.tolist()}")
+        for idx in problem_indices:
+            print(f"Index {idx}:")
+            print(f"  num_completion_tokens: {num_completion_tokens_B[idx].item()}")
+            print(f"  sum_log_probs: {sum_log_probs_B[idx].item()}")
+            # Find corresponding indices in the original gathered_log_probs
+            problem_gathered_log_probs = gathered_log_probs[idx][valid_completion_indices_shifted[idx]]
+            print(f"  Min/Max gathered log_probs for completion: {problem_gathered_log_probs.min().item() if len(problem_gathered_log_probs) > 0 else 'N/A'} / {problem_gathered_log_probs.max().item() if len(problem_gathered_log_probs) > 0 else 'N/A'}")
+            # Check original logits (might be large)
+            problem_logits = shifted_logits[idx][valid_completion_indices_shifted[idx]]
+            print(f"  Min/Max logits for completion tokens: {problem_logits.min().item() if len(problem_logits) > 0 else 'N/A'} / {problem_logits.max().item() if len(problem_logits) > 0 else 'N/A'}")
 
     assert mean_log_probs_B.shape == (
         batch_size,
@@ -318,11 +343,23 @@ def get_batch_loss(
     policy_chosen_outputs = model(
         concat_chosen_ids, attention_mask=concat_chosen_mask, return_dict=True
     )
+    if torch.isnan(policy_chosen_outputs.logits).any():
+        print(f"!!! DEBUG: NaN detected in policy_chosen_outputs.logits at step {global_step} !!!")
+        # Consider printing shapes or sums of input_ids/attn_mask to see if they're weird
+        # print(f"Input IDs shape: {concat_chosen_ids.shape}")
+        # print(f"Attention Mask sum: {concat_chosen_mask.float().sum()}")
+        raise RuntimeError("NaN in policy chosen logits") # Stop execution
+
     policy_rejected_outputs = model(
         concat_rejected_ids,
         attention_mask=concat_rejected_mask,
         return_dict=True,
     )
+
+    if torch.isnan(policy_rejected_outputs.logits).any():
+        print(f"!!! DEBUG: NaN detected in policy_rejected_outputs.logits at step {global_step} !!!")
+        raise RuntimeError("NaN in policy rejected logits")
+
     # Reference model (no gradients needed)
     with torch.no_grad():
         ref_chosen_outputs = ref_model(
@@ -650,7 +687,7 @@ except Exception as e:
 
 
 # Save the trained model
-output_dir = 'big_dpo_model_revised_dl_stats'   # Changed name slightly
+output_dir = 'small_dpo_model_revised_dl_stats'   # Changed name slightly
 print(f'Saving model to {output_dir}...')
 try:
     model.save_pretrained(output_dir)

@@ -79,6 +79,7 @@ def filter_dpo_dataset_by_response_length(
 ) -> Dataset:
     """
     Filters a DPO-formatted dataset based on tokenized length of chosen/rejected RESPONSES.
+    Ensures response lengths are > 0 and <= max_response_length.
     Expects dataset with 'chosen', 'rejected' text columns.
     """
     if not dataset or not all(
@@ -88,49 +89,72 @@ def filter_dpo_dataset_by_response_length(
             "Warning: Dataset missing 'chosen' or 'rejected' columns for filtering. Skipping length filtering."
         )
         return dataset
-    if max_response_length <= 0:
-        print(
-            'Warning: max_response_length is non-positive. Skipping length filtering.'
-        )
-        return dataset
+    # Allow max_response_length <= 0 to disable MAX length filtering,
+    # but we still want to filter ZERO length responses.
 
     initial_count = len(dataset)
     if initial_count == 0:
-        return dataset   # Skip if empty
+        return dataset  # Skip if empty
 
     print(
-        f'Filtering dataset with {initial_count} examples by max response length {max_response_length}...'
+        f'Filtering dataset with {initial_count} examples by response length (must be > 0'
+        + (f' and <= {max_response_length}' if max_response_length > 0 else '') + ')...'
     )
 
     # Define function to check length
     def is_response_length_ok(example):
-        len_chosen = len(
-            tokenizer.encode(example['chosen'], add_special_tokens=False)
-        )
-        len_rejected = len(
-            tokenizer.encode(example['rejected'], add_special_tokens=False)
-        )
-        return (
-            len_chosen <= max_response_length
-            and len_rejected <= max_response_length
-        )
+        # Get text safely, default to empty string if missing or None
+        chosen_text = example.get('chosen', '')
+        rejected_text = example.get('rejected', '')
+
+        # Check for potentially empty strings before tokenization (optional but good practice)
+        if not chosen_text or not rejected_text:
+            return False
+
+        # Tokenize (without adding special tokens for length check)
+        chosen_tokens = tokenizer.encode(chosen_text, add_special_tokens=False)
+        rejected_tokens = tokenizer.encode(rejected_text, add_special_tokens=False)
+
+        len_chosen = len(chosen_tokens)
+        len_rejected = len(rejected_tokens)
+
+        # --- MODIFIED CONDITION ---
+        # Ensure length is strictly positive AND respects max_length (if specified)
+        is_len_ok = len_chosen > 0 and len_rejected > 0
+        if max_response_length > 0:
+             is_len_ok = is_len_ok and (len_chosen <= max_response_length and len_rejected <= max_response_length)
+        # --- END MODIFICATION ---
+
+        return is_len_ok
 
     # Use filter directly
     try:
+        # Determine num_proc safely
+        num_proc = min(os.cpu_count(), 8) # Limit cpu usage somewhat if many cores
+        print(f"Using {num_proc} processes for filtering...")
         filtered_dataset = dataset.filter(
-            is_response_length_ok, num_proc=os.cpu_count()
-        )   # Use multiple processes
+            is_response_length_ok, num_proc=num_proc
+        )
     except Exception as e:
         print(
             f'Warning: Error during filtering process: {e}. Returning unfiltered dataset.'
         )
-        return dataset
+        # Consider falling back to single-process filtering if multiprocessing fails
+        # try:
+        #     print("Retrying filtering with num_proc=1...")
+        #     filtered_dataset = dataset.filter(is_response_length_ok, num_proc=1)
+        # except Exception as e2:
+        #      print(f'Single-process filtering also failed: {e2}. Returning unfiltered.')
+        #      return dataset
+        return dataset # Return unfiltered on error for now
 
     final_count = len(filtered_dataset)
     num_removed = initial_count - final_count
     if num_removed > 0:
         print(
-            f'Filtered {num_removed}/{initial_count} examples where chosen/rejected response exceeded max token length {max_response_length}'
+            # --- MODIFIED PRINT STATEMENT ---
+            f'Filtered {num_removed}/{initial_count} examples due to response length constraints (length was 0 or > {max_response_length} [if specified])'
+            # --- END MODIFICATION ---
         )
     else:
         print('No examples removed by length filtering.')
