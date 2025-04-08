@@ -337,7 +337,8 @@ if __name__ == '__main__':
     checkpoint = 'HuggingFaceTB/SmolLM2-135M-Instruct'
     # checkpoint = 'HuggingFaceTB/SmolLM2-1.7B-Instruct'
     # trained_model_path = 'big_dpo_model'
-    trained_model_path = 'small_dpo_model_revised_dl_stats'
+    # trained_model_path = 'small_dpo_model_revised_dl_stats'
+    trained_model_path = 'long_dpo_final_model'
     dataset_path = './datasets/dataset.json'
     gen_max_length = 150
     num_good_to_show = 5  # Number of HARMLESS examples

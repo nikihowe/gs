@@ -5,52 +5,55 @@ from transformers import (
     AutoTokenizer,
     PreTrainedTokenizer,
 )
-
-# import matplotlib.pyplot as plt # Removed as not currently used
 from tqdm import tqdm
 import math
 from torch.utils.data import DataLoader
 from functools import partial
 from typing import Dict, List, Union
+import os  # <<< Added for path operations
 
 # Assuming these utils exist and function correctly
-# get_the_datasets should return HF Dataset objects with 'prompt', 'chosen', 'rejected' text columns
 from dataset_utils2 import (
     get_the_datasets,
-)   # Removed dpoify_dataset, filter_too_long as they are internal to get_the_datasets
+)
 
 torch.set_default_dtype(torch.float32)
-torch.autograd.set_detect_anomaly(True)   # Enable for debugging NaNs
+# torch.autograd.set_detect_anomaly(True) # Enable for debugging NaNs, disable for performance/checkpointing runs
 
 # --- Hyperparameters ---
-EPOCHS = 1  # Start with 1 epoch, see if we need more
-MINIBATCH_SIZE = 16   # Per device batch size (DataLoader batch size)
-BATCH_SIZE = 32      # Effective batch size after gradient accumulation
+EPOCHS = 1  # Adjust as needed for longer runs
+MINIBATCH_SIZE = 2   # Per device batch size (DataLoader batch size)
+BATCH_SIZE = 32       # Effective batch size after gradient accumulation
 ACCUMULATION_STEPS = BATCH_SIZE // MINIBATCH_SIZE
-# BATCHES_PER_EPOCH = 8 # <<<--- REMOVED: Determined by DataLoader
 LEARNING_RATE = 1e-6
 BETA = 0.1
-EVAL_STEPS = 100     # Evaluate validation loss every N optimizer steps
+EVAL_STEPS = 100       # Evaluate validation loss every N optimizer steps
+SAVE_INTERVAL = 20    # <<< ADDED: Save checkpoint every N optimizer steps
 MAX_EVAL_SAMPLES = 300
-MAX_LENGTH = 512     # Define a max sequence length for padding/truncation
+MAX_LENGTH = 512       # Define a max sequence length for padding/truncation
 NUM_WORKERS = 4  # Number of workers for DataLoader (adjust based on system)
-LOG_INTERVAL = 2     # <<<--- MODIFIED: Log accumulated train loss every N optimizer steps
+LOG_INTERVAL = 10      # Log accumulated train loss every N optimizer steps (adjusted for less noise)
+CHECKPOINT_DIR = './large_dpo_checkpoints' # <<< ADDED: Directory to save checkpoints
+FINAL_MODEL_DIR = './large_long_dpo_final_model' # <<< ADDED: Directory for the final trained model
 
 # --- Setup ---
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(f'Using device: {device}')
 
+# Create checkpoint directory if it doesn't exist
+os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+print(f"Checkpoints will be saved in: {CHECKPOINT_DIR}")
+
 # Load the model and tokenizer
-# Try gpt2
 # checkpoint = 'gpt2'
-checkpoint = 'HuggingFaceTB/SmolLM2-135M-Instruct'
+# checkpoint = 'HuggingFaceTB/SmolLM2-135M-Instruct'
 # checkpoint = 'HuggingFaceTB/SmolLM2-360M-Instruct'
-# checkpoint = 'HuggingFaceTB/SmolLM2-1.7B-Instruct'
+checkpoint = 'HuggingFaceTB/SmolLM2-1.7B-Instruct'
 tokenizer = AutoTokenizer.from_pretrained(checkpoint)
 if tokenizer.pad_token is None:
     tokenizer.pad_token = (
         tokenizer.eos_token
-    )   # Common practice if no pad token
+    )  # Common practice if no pad token
     print(
         f'Tokenizer has no pad token, setting it to EOS token: {tokenizer.pad_token}'
     )
@@ -67,19 +70,46 @@ for param in ref_model.parameters():
     param.requires_grad = False
 print('Reference model parameters frozen.')
 
+# --- Optimizer Definition ---
+# Define optimizer here so we can load its state if resuming
+optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
+
+# --- Checkpoint Loading ---
+start_epoch = 0
+global_step = 0 # Initialize global_step here
+latest_checkpoint_path = os.path.join(CHECKPOINT_DIR, 'latest_checkpoint.pth')
+
+if os.path.exists(latest_checkpoint_path):
+    print(f"Loading checkpoint from {latest_checkpoint_path}")
+    try:
+        checkpoint_data = torch.load(latest_checkpoint_path, map_location=device)
+        model.load_state_dict(checkpoint_data['model_state_dict'])
+        optimizer.load_state_dict(checkpoint_data['optimizer_state_dict'])
+        start_epoch = checkpoint_data['epoch']
+        global_step = checkpoint_data['global_step']
+        # Ensure optimizer tensors are on the correct device (sometimes needed after loading)
+        for state in optimizer.state.values():
+            for k, v in state.items():
+                if isinstance(v, torch.Tensor):
+                    state[k] = v.to(device)
+        print(f"Resumed training from Epoch {start_epoch}, Global Step {global_step}")
+    except Exception as e:
+        print(f"Error loading checkpoint: {e}. Starting from scratch.")
+        start_epoch = 0
+        global_step = 0
+else:
+    print("No checkpoint found. Starting training from scratch.")
+
+
 # --- Collate Function ---
-# Moved directly into the script
+# Define global_step before this if used inside for debug prints
+# (It is used in extract_log_probs' debug prints)
 def dpo_collate_fn(
     batch: List[Dict[str, str]],
     tokenizer: PreTrainedTokenizer,
     max_length: int,
 ) -> Dict[str, torch.Tensor]:
-    """
-    Collate function to prepare DPO batches.
-    Tokenizes prompts, chosen, and rejected responses separately,
-    pads them dynamically (longest) within the batch.
-    """
-    # Ensure required keys are present
+    # ... (collate function remains the same) ...
     if not batch or not all(
         k in batch[0] for k in ['prompt', 'chosen', 'rejected']
     ):
@@ -91,8 +121,6 @@ def dpo_collate_fn(
     chosen_responses = [item['chosen'] for item in batch]
     rejected_responses = [item['rejected'] for item in batch]
 
-    # Tokenize each part separately, padding to longest in batch
-    # Important: Ensure tokenizer handles padding side correctly (usually right for Causal LMs)
     prompt_tok = tokenizer(
         prompts,
         max_length=max_length,
@@ -127,21 +155,27 @@ def dpo_collate_fn(
 
 # --- Dataset Preparation ---
 print('Loading datasets...')
-hf_train_dataset_full = get_the_datasets(tokenizer, max_length=MAX_LENGTH)
-hf_test_dataset = get_the_datasets(tokenizer, max_length=MAX_LENGTH, test=True)
+# Consider using a persistent cache location if /tmp gets cleared often between runs
+# cache_dir = './hf_datasets_cache' # Example persistent cache
+hf_train_dataset_full = get_the_datasets(
+    tokenizer, max_length=MAX_LENGTH, data_dir='.', # Use '.' or specific dir for cache
+    processed_cache_base='/tmp' # Keep processed data fast if desired
+)
+hf_test_dataset = get_the_datasets(
+    tokenizer, max_length=MAX_LENGTH, test=True, data_dir='.',
+    processed_cache_base='/tmp'
+)
 print('Full datasets loaded.')
 
 
-# <<<--- ADD SUBSETTING LOGIC HERE --->>>
-train_subset_size = 10000 # Or 5000 or even 1000 for very quick tests
-# Make sure the dataset size is larger than the subset size
+# --- Subsetting Logic ---
+train_subset_size = 40000 # Or adjust as needed
 if len(hf_train_dataset_full) > train_subset_size:
     hf_train_dataset = hf_train_dataset_full.select(range(train_subset_size))
     print(f"Using a subset of {train_subset_size} training examples.")
 else:
-    hf_train_dataset = hf_train_dataset_full # Use full dataset if it's smaller than desired subset
+    hf_train_dataset = hf_train_dataset_full
     print(f"Using full training dataset ({len(hf_train_dataset)} examples).")
-# <<<--- END OF SUBSETTING LOGIC --->>>
 
 # --- Create DataLoaders ---
 collate_wrapper = partial(
@@ -149,295 +183,195 @@ collate_wrapper = partial(
 )
 
 train_dataloader = DataLoader(
-    hf_train_dataset,  # Use HF dataset directly
+    hf_train_dataset,
     batch_size=MINIBATCH_SIZE,
-    shuffle=True,
+    shuffle=True, # Note: Simple resumption restarts shuffling from the beginning of the epoch
     collate_fn=collate_wrapper,
     num_workers=NUM_WORKERS,
-    pin_memory=True,  # Usually good practice with GPUs
+    pin_memory=True if device=='cuda' else False, # Only pin if using GPU
 )
 val_dataloader = DataLoader(
-    hf_test_dataset,  # Use HF dataset directly
-    batch_size=MINIBATCH_SIZE,  # Use same per-device size for validation
+    hf_test_dataset,
+    batch_size=MINIBATCH_SIZE,
     shuffle=False,
     collate_fn=collate_wrapper,
     num_workers=NUM_WORKERS,
-    pin_memory=True,
+    pin_memory=True if device=='cuda' else False,
 )
-print(
-    f'Train DataLoader: {len(train_dataloader)} batches of size {MINIBATCH_SIZE}'
-)
-print(
-    f'Validation DataLoader: {len(val_dataloader)} batches of size {MINIBATCH_SIZE}'
-)
+# Calculate total steps considering potential resumption
+# Note: This might slightly overestimate if the last epoch wasn't fully completed before stopping
+estimated_total_steps = math.ceil(len(train_dataloader) / ACCUMULATION_STEPS) * EPOCHS
+print(f'Train DataLoader: {len(train_dataloader)} batches of size {MINIBATCH_SIZE}')
+print(f'Validation DataLoader: {len(val_dataloader)} batches of size {MINIBATCH_SIZE}')
+print(f'Estimated total optimizer steps for {EPOCHS} epochs: {estimated_total_steps}')
 
 
 # --- Loss Calculation Functions ---
-# (Assuming extract_log_probs and dpo_loss_function are defined as in previous correct versions)
-# Make sure extract_log_probs uses prompt_attention_mask to find prompt length correctly
+# Pass global_step explicitly if needed for debugging, or rely on the global variable
+# Make sure extract_log_probs uses prompt_attention_mask correctly
 def extract_log_probs(
-    logits: torch.Tensor,  # Shape: (batch_size, sequence_length, vocab_size)
-    labels: torch.Tensor,  # Shape: (batch_size, sequence_length)
-    prompt_mask: torch.Tensor,  # Shape: (batch_size, sequence_length) - mask TRUE for prompt tokens
-    completion_mask: torch.Tensor,  # Shape: (batch_size, sequence_length) - mask TRUE for completion tokens
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    prompt_mask: torch.Tensor,
+    completion_mask: torch.Tensor,
+    current_global_step: int # Pass step for context in prints
 ) -> torch.Tensor:
-    """
-    Calculates the average log probability of the completion tokens.
-    Assumes labels includes prompt + completion.
-    Assumes prompt_mask and completion_mask are for the *original* sequence length.
-    """
+    # ... (rest of extract_log_probs) ...
     shifted_logits = logits[:, :-1, :]
     shifted_labels = labels[:, 1:]
     batch_size, seq_len_shifted, vocab_size = shifted_logits.shape
 
-    # --- Add Debug Prints for Ranges ---
-    # Check only occasionally to avoid too much log spam
-    if global_step % 20 == 0 or global_step < 5: # Check frequently early on
-         print(f"\n--- Debug LogProb Ranges (Step {global_step}) ---")
-         if not torch.isnan(shifted_logits).any() and not torch.isinf(shifted_logits).any():
-             print(f"shifted_logits: min={shifted_logits.min().item():.4f}, max={shifted_logits.max().item():.4f}")
-         else:
-             print("!!! shifted_logits contains NaN/Inf !!!") # Should trigger the earlier check too
-    # --- End Debug Prints ---
+    # Debug Prints
+    # if current_global_step % 50 == 0 or current_global_step < 5: # Adjusted frequency
+    #     print(f"\n--- Debug LogProb Ranges (Step {current_global_step}) ---")
+    #     if not torch.isnan(shifted_logits).any() and not torch.isinf(shifted_logits).any():
+    #         print(f"shifted_logits: min={shifted_logits.min().item():.4f}, max={shifted_logits.max().item():.4f}")
+    #     else:
+    #         print("!!! shifted_logits contains NaN/Inf !!!")
 
     if torch.isnan(shifted_logits).any() or torch.isinf(shifted_logits).any():
-        print(f"!!! WARNING: NaN/Inf detected in shifted_logits BEFORE log_softmax at step {global_step} !!!")
+        print(f"!!! WARNING: NaN/Inf detected in shifted_logits BEFORE log_softmax at step {current_global_step} !!!")
+        # Consider adding more context here if needed
 
     log_probs_all = F.log_softmax(shifted_logits, dim=-1)
     gathered_log_probs = torch.gather(
         log_probs_all, 2, shifted_labels.unsqueeze(-1)
     ).squeeze(-1)
 
-    # Completion mask for the *shifted* sequence (predicting token k using index k-1)
-    completion_mask_orig_shifted = completion_mask[
-        :, 1:
-    ]   # Align completion mask with shifted seq
-    prompt_mask_shifted = prompt_mask[
-        :, :-1
-    ]   # Align prompt mask with shifted seq
+    completion_mask_orig_shifted = completion_mask[:, 1:]
+    prompt_mask_shifted = prompt_mask[:, :-1]
+    valid_completion_indices_shifted = completion_mask_orig_shifted & (~prompt_mask_shifted)
 
-    # Valid completion indices in shifted seq: not part of prompt AND part of original completion
-    valid_completion_indices_shifted = completion_mask_orig_shifted & (
-        ~prompt_mask_shifted
-    )
-
-    # Mask should be true only for valid completion tokens in the shifted sequence
-    masked_log_probs = (
-        gathered_log_probs * valid_completion_indices_shifted
-    )   # Element-wise mul
-
+    masked_log_probs = gathered_log_probs * valid_completion_indices_shifted
     sum_log_probs_B = masked_log_probs.sum(dim=-1)
-    num_completion_tokens_B = valid_completion_indices_shifted.sum(
-        dim=-1
-    ).float()
+    num_completion_tokens_B = valid_completion_indices_shifted.sum(dim=-1).float()
 
-    # --- Add Debug Prints for Ranges ---
-    if global_step % 20 == 0 or global_step < 5:
-         print(f"num_completion_tokens_B: min={num_completion_tokens_B.min().item():.1f}, max={num_completion_tokens_B.max().item():.1f}")
-         if not torch.isnan(sum_log_probs_B).any() and not torch.isinf(sum_log_probs_B).any():
-             print(f"sum_log_probs_B: min={sum_log_probs_B.min().item():.4f}, max={sum_log_probs_B.max().item():.4f}")
-         else:
-             print("!!! sum_log_probs_B contains NaN/Inf !!!")
-    # --- End Debug Prints ---
+    # Debug Prints
+    # if current_global_step % 50 == 0 or current_global_step < 5:
+    #     print(f"num_completion_tokens_B: min={num_completion_tokens_B.min().item():.1f}, max={num_completion_tokens_B.max().item():.1f}")
+    #     if not torch.isnan(sum_log_probs_B).any() and not torch.isinf(sum_log_probs_B).any():
+    #         print(f"sum_log_probs_B: min={sum_log_probs_B.min().item():.4f}, max={sum_log_probs_B.max().item():.4f}")
+    #     else:
+    #         print("!!! sum_log_probs_B contains NaN/Inf !!!")
 
+    # Handle division by zero safely
     mean_log_probs_B = torch.where(
         num_completion_tokens_B > 0,
         sum_log_probs_B / num_completion_tokens_B,
         torch.zeros_like(sum_log_probs_B),
     )
 
-    if (
-        torch.isnan(mean_log_probs_B).any()
-        or torch.isinf(mean_log_probs_B).any()
-    ):
-        print('--- DEBUG: NaN or Inf detected in mean_log_probs_B! ---')
+    # NaN Check with Debugging Info
+    if torch.isnan(mean_log_probs_B).any() or torch.isinf(mean_log_probs_B).any():
+        print(f'--- DEBUG: NaN or Inf detected in mean_log_probs_B at Step {current_global_step}! ---')
         problem_indices = torch.where(torch.isnan(mean_log_probs_B) | torch.isinf(mean_log_probs_B))[0]
         print(f"Problematic indices in batch: {problem_indices.tolist()}")
-        for idx in problem_indices:
-            print(f"Index {idx}:")
+        for idx in problem_indices[:min(len(problem_indices), 3)]: # Print details for first few
+            print(f" Index {idx}:")
             print(f"  num_completion_tokens: {num_completion_tokens_B[idx].item()}")
             print(f"  sum_log_probs: {sum_log_probs_B[idx].item()}")
-            # Find corresponding indices in the original gathered_log_probs
-            problem_gathered_log_probs = gathered_log_probs[idx][valid_completion_indices_shifted[idx]]
-            print(f"  Min/Max gathered log_probs for completion: {problem_gathered_log_probs.min().item() if len(problem_gathered_log_probs) > 0 else 'N/A'} / {problem_gathered_log_probs.max().item() if len(problem_gathered_log_probs) > 0 else 'N/A'}")
-            # Check original logits (might be large)
-            problem_logits = shifted_logits[idx][valid_completion_indices_shifted[idx]]
-            print(f"  Min/Max logits for completion tokens: {problem_logits.min().item() if len(problem_logits) > 0 else 'N/A'} / {problem_logits.max().item() if len(problem_logits) > 0 else 'N/A'}")
+            # Add more debugging if needed, e.g., check inputs that led to this
+        # raise RuntimeError(f"NaN detected in mean log probs at step {current_global_step}") # Optional: Stop execution
 
-    assert mean_log_probs_B.shape == (
-        batch_size,
-    ), f'Expected shape ({batch_size},) but got {mean_log_probs_B.shape}'
+    assert mean_log_probs_B.shape == (batch_size,), f'Expected shape ({batch_size},) but got {mean_log_probs_B.shape}'
     return mean_log_probs_B
 
 
 def dpo_loss_function(
-    policy_chosen_logprobs: torch.Tensor,  # Shape: (B,)
-    policy_rejected_logprobs: torch.Tensor,  # Shape: (B,)
-    ref_chosen_logprobs: torch.Tensor,  # Shape: (B,)
-    ref_rejected_logprobs: torch.Tensor,  # Shape: (B,)
+    policy_chosen_logprobs: torch.Tensor,
+    policy_rejected_logprobs: torch.Tensor,
+    ref_chosen_logprobs: torch.Tensor,
+    ref_rejected_logprobs: torch.Tensor,
     beta: float,
+    current_global_step: int # Pass step for context
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Calculates the DPO loss."""
+    # ... (rest of dpo_loss_function) ...
     pi_logratios = policy_chosen_logprobs - policy_rejected_logprobs
     ref_logratios = ref_chosen_logprobs - ref_rejected_logprobs
 
-    logits = pi_logratios - ref_logratios    
-    logits.requires_grad_(True) # Ensure grad is tracked for debugging
+    # Check for NaNs in inputs early
+    if any(torch.isnan(t).any() for t in [policy_chosen_logprobs, policy_rejected_logprobs, ref_chosen_logprobs, ref_rejected_logprobs]):
+         print(f"!!! WARNING: NaN detected in logprob inputs to DPO loss at step {current_global_step} !!!")
+         # Add more specific checks if needed
+
+    logits = pi_logratios - ref_logratios
+    # logits.requires_grad_(True) # Not usually necessary here, handled by inputs
+
+    # Debug Prints
+    # if torch.isnan(logits).any() or torch.isinf(logits).any() or current_global_step % 50 == 0:
+    #     print(f"\n--- Debug DPO Loss Inputs (Step {current_global_step}) ---")
+    #     # Print stats safely, handling potential NaNs/Infs
+    #     for name, tensor in [('Policy Chosen', policy_chosen_logprobs), ('Policy Rejected', policy_rejected_logprobs),
+    #                          ('Ref Chosen', ref_chosen_logprobs), ('Ref Rejected', ref_rejected_logprobs),
+    #                          ('Logits', logits)]:
+    #         if not torch.isnan(tensor).any() and not torch.isinf(tensor).any():
+    #              print(f"{name} Logprobs/Logits: min={tensor.min().item():.4f}, max={tensor.max().item():.4f}, mean={tensor.mean().item():.4f}")
+    #         else:
+    #              print(f"{name} Logprobs/Logits: CONTAINS NaN/Inf !!!")
 
 
-    # --- Add Debug Prints ---
-    # Check only occasionally or if NaNs occur to avoid spamming logs
-    if torch.isnan(logits).any() or torch.isinf(logits).any() or global_step % 50 == 0: # Example condition
-        print(f"\n--- Debug DPO Loss Inputs (Step {global_step}) ---")
-        print(f"Policy Chosen Logprobs: min={policy_chosen_logprobs.min().item():.4f}, max={policy_chosen_logprobs.max().item():.4f}")
-        print(f"Policy Rejected Logprobs: min={policy_rejected_logprobs.min().item():.4f}, max={policy_rejected_logprobs.max().item():.4f}")
-        print(f"Ref Chosen Logprobs: min={ref_chosen_logprobs.min().item():.4f}, max={ref_chosen_logprobs.max().item():.4f}")
-        print(f"Ref Rejected Logprobs: min={ref_rejected_logprobs.min().item():.4f}, max={ref_rejected_logprobs.max().item():.4f}")
-        print(f"Logits (pi_lr - ref_lr): min={logits.min().item():.4f}, max={logits.max().item():.4f}")
-    # --- End Debug Prints ---
+    loss = -F.logsigmoid(beta * logits).mean()
 
-    # The loss is the negative log-likelihood of the policy accurately classifying the chosen answer as better
-    # Uses the Bradley-Terry model probability P(chosen > rejected) = sigmoid(beta * (log_pi(chosen)/ref(chosen) - log_pi(rejected)/ref(rejected)))
-    loss = -F.logsigmoid(beta * logits).mean()   # Average loss over the batch
-    # loss = (beta * logits).mean() # Test 1: Linear loss
+    # Check loss value
+    if torch.isnan(loss):
+         print(f"!!! WARNING: DPO loss is NaN at step {current_global_step} !!!")
+         # raise RuntimeError(f"NaN loss encountered at step {current_global_step}") # Optional: Stop
 
-
-    # Calculate rewards for logging purposes (detached from the graph)
-    chosen_rewards = (
-        beta * (policy_chosen_logprobs - ref_chosen_logprobs).detach()
-    )
-    rejected_rewards = (
-        beta * (policy_rejected_logprobs - ref_rejected_logprobs).detach()
-    )
+    chosen_rewards = beta * (policy_chosen_logprobs - ref_chosen_logprobs).detach()
+    rejected_rewards = beta * (policy_rejected_logprobs - ref_rejected_logprobs).detach()
 
     return loss, chosen_rewards, rejected_rewards
 
 
 def get_batch_loss(
-    batch: dict[
-        str, torch.Tensor
-    ],  # Batch directly from DataLoader/collate_fn
+    batch: dict[str, torch.Tensor],
     model: AutoModelForCausalLM,
     ref_model: AutoModelForCausalLM,
     beta: float,
+    current_global_step: int # Pass step for context
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Computes the DPO loss and associated rewards for a given batch."""
+    # ... (rest of get_batch_loss, making sure to pass current_global_step to sub-functions) ...
 
     # --- 1. Concatenate prompt and completions ---
-    # Assumes inputs are already padded correctly by collate_fn
-    # Handle potential variations in max length due to dynamic padding
-    max_prompt_len = batch['prompt_input_ids'].size(1)
-    max_chosen_len = batch['chosen_input_ids'].size(1)
-    max_rejected_len = batch['rejected_input_ids'].size(1)
-
-    concat_chosen_ids = torch.cat(
-        [batch['prompt_input_ids'], batch['chosen_input_ids']], dim=-1
-    )
-    concat_chosen_mask = torch.cat(
-        [batch['prompt_attention_mask'], batch['chosen_attention_mask']],
-        dim=-1,
-    )
-    concat_rejected_ids = torch.cat(
-        [batch['prompt_input_ids'], batch['rejected_input_ids']], dim=-1
-    )
-    concat_rejected_mask = torch.cat(
-        [batch['prompt_attention_mask'], batch['rejected_attention_mask']],
-        dim=-1,
-    )
+    concat_chosen_ids = torch.cat([batch['prompt_input_ids'], batch['chosen_input_ids']], dim=-1)
+    concat_chosen_mask = torch.cat([batch['prompt_attention_mask'], batch['chosen_attention_mask']], dim=-1)
+    concat_rejected_ids = torch.cat([batch['prompt_input_ids'], batch['rejected_input_ids']], dim=-1)
+    concat_rejected_mask = torch.cat([batch['prompt_attention_mask'], batch['rejected_attention_mask']], dim=-1)
 
     # --- Create masks needed for log prob extraction ---
-    # These masks identify which tokens belong to the prompt and completion *within the concatenated sequence*
-    prompt_only_mask_chosen = torch.cat(
-        [
-            batch['prompt_attention_mask'],
-            torch.zeros_like(batch['chosen_attention_mask']),
-        ],
-        dim=-1,
-    )
-    prompt_only_mask_rejected = torch.cat(
-        [
-            batch['prompt_attention_mask'],
-            torch.zeros_like(batch['rejected_attention_mask']),
-        ],
-        dim=-1,
-    )
-    completion_only_mask_chosen = torch.cat(
-        [
-            torch.zeros_like(batch['prompt_attention_mask']),
-            batch['chosen_attention_mask'],
-        ],
-        dim=-1,
-    )
-    completion_only_mask_rejected = torch.cat(
-        [
-            torch.zeros_like(batch['prompt_attention_mask']),
-            batch['rejected_attention_mask'],
-        ],
-        dim=-1,
-    )
+    prompt_only_mask_chosen = torch.cat([batch['prompt_attention_mask'], torch.zeros_like(batch['chosen_attention_mask'])], dim=-1)
+    prompt_only_mask_rejected = torch.cat([batch['prompt_attention_mask'], torch.zeros_like(batch['rejected_attention_mask'])], dim=-1)
+    completion_only_mask_chosen = torch.cat([torch.zeros_like(batch['prompt_attention_mask']), batch['chosen_attention_mask']], dim=-1)
+    completion_only_mask_rejected = torch.cat([torch.zeros_like(batch['prompt_attention_mask']), batch['rejected_attention_mask']], dim=-1)
 
     # --- 2. Get Model Outputs ---
-    # Policy model (requires gradients)
-    policy_chosen_outputs = model(
-        concat_chosen_ids, attention_mask=concat_chosen_mask, return_dict=True
-    )
+    # Policy model
+    policy_chosen_outputs = model(concat_chosen_ids, attention_mask=concat_chosen_mask, return_dict=True)
     if torch.isnan(policy_chosen_outputs.logits).any():
-        print(f"!!! DEBUG: NaN detected in policy_chosen_outputs.logits at step {global_step} !!!")
-        # Consider printing shapes or sums of input_ids/attn_mask to see if they're weird
-        # print(f"Input IDs shape: {concat_chosen_ids.shape}")
-        # print(f"Attention Mask sum: {concat_chosen_mask.float().sum()}")
-        raise RuntimeError("NaN in policy chosen logits") # Stop execution
+        print(f"!!! DEBUG: NaN detected in policy_chosen_outputs.logits at step {current_global_step} !!!")
+        raise RuntimeError(f"NaN in policy chosen logits at step {current_global_step}")
 
-    policy_rejected_outputs = model(
-        concat_rejected_ids,
-        attention_mask=concat_rejected_mask,
-        return_dict=True,
-    )
-
+    policy_rejected_outputs = model(concat_rejected_ids, attention_mask=concat_rejected_mask, return_dict=True)
     if torch.isnan(policy_rejected_outputs.logits).any():
-        print(f"!!! DEBUG: NaN detected in policy_rejected_outputs.logits at step {global_step} !!!")
-        raise RuntimeError("NaN in policy rejected logits")
+        print(f"!!! DEBUG: NaN detected in policy_rejected_outputs.logits at step {current_global_step} !!!")
+        raise RuntimeError(f"NaN in policy rejected logits at step {current_global_step}")
 
-    # Reference model (no gradients needed)
+    # Reference model
     with torch.no_grad():
-        ref_chosen_outputs = ref_model(
-            concat_chosen_ids,
-            attention_mask=concat_chosen_mask,
-            return_dict=True,
-        )
-        ref_rejected_outputs = ref_model(
-            concat_rejected_ids,
-            attention_mask=concat_rejected_mask,
-            return_dict=True,
-        )
+        ref_chosen_outputs = ref_model(concat_chosen_ids, attention_mask=concat_chosen_mask, return_dict=True)
+        ref_rejected_outputs = ref_model(concat_rejected_ids, attention_mask=concat_rejected_mask, return_dict=True)
+        # Add NaN checks for ref model logits too, if concerned they might cause issues downstrea
+        if torch.isnan(ref_chosen_outputs.logits).any() or torch.isnan(ref_rejected_outputs.logits).any():
+             print(f"!!! WARNING: NaN detected in REFERENCE model logits at step {current_global_step} !!!")
+             # Logprobs extraction might handle this, but good to know
+
 
     # --- 3. Extract Log Probabilities for Completions ---
-    # Uses the model logits, the concatenated IDs (as labels), and the specific masks
-    policy_chosen_logprobs = extract_log_probs(
-        policy_chosen_outputs.logits,
-        concat_chosen_ids,
-        prompt_only_mask_chosen,
-        completion_only_mask_chosen,
-    )
-    policy_rejected_logprobs = extract_log_probs(
-        policy_rejected_outputs.logits,
-        concat_rejected_ids,
-        prompt_only_mask_rejected,
-        completion_only_mask_rejected,
-    )
-    # Use the same masks for the reference model outputs
-    ref_chosen_logprobs = extract_log_probs(
-        ref_chosen_outputs.logits,
-        concat_chosen_ids,
-        prompt_only_mask_chosen,
-        completion_only_mask_chosen,
-    )
-    ref_rejected_logprobs = extract_log_probs(
-        ref_rejected_outputs.logits,
-        concat_rejected_ids,
-        prompt_only_mask_rejected,
-        completion_only_mask_rejected,
-    )
+    policy_chosen_logprobs = extract_log_probs(policy_chosen_outputs.logits, concat_chosen_ids, prompt_only_mask_chosen, completion_only_mask_chosen, current_global_step)
+    policy_rejected_logprobs = extract_log_probs(policy_rejected_outputs.logits, concat_rejected_ids, prompt_only_mask_rejected, completion_only_mask_rejected, current_global_step)
+    with torch.no_grad(): # Ensure ref logprobs don't track grads
+         ref_chosen_logprobs = extract_log_probs(ref_chosen_outputs.logits, concat_chosen_ids, prompt_only_mask_chosen, completion_only_mask_chosen, current_global_step)
+         ref_rejected_logprobs = extract_log_probs(ref_rejected_outputs.logits, concat_rejected_ids, prompt_only_mask_rejected, completion_only_mask_rejected, current_global_step)
 
     # --- 4. Compute DPO Loss ---
     loss, chosen_rewards, rejected_rewards = dpo_loss_function(
@@ -446,6 +380,7 @@ def get_batch_loss(
         ref_chosen_logprobs,
         ref_rejected_logprobs,
         beta=beta,
+        current_global_step=current_global_step
     )
 
     return loss, chosen_rewards, rejected_rewards
@@ -453,230 +388,227 @@ def get_batch_loss(
 
 # --- DPO Training Loop ---
 model.train()
-optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
-optimizer.zero_grad()   # Zero gradients initially
+optimizer.zero_grad()  # Zero gradients initially (might be redundant if loaded checkpoint already had zeroed grads, but safe)
 
-global_step = 0   # Tracks optimizer steps
-total_steps = math.ceil(len(train_dataloader) / ACCUMULATION_STEPS) * EPOCHS
-print(f'Total optimizer steps: {total_steps}')
-print(f'Logging training stats every {LOG_INTERVAL} optimizer steps.')
-print(f'Running validation every {EVAL_STEPS} optimizer steps.')
+print(f'Starting training from Epoch {start_epoch}, Global Step {global_step}...')
+# Use range starting from start_epoch
+for epoch in range(start_epoch, EPOCHS):
+    print(f'--- Epoch {epoch+1}/{EPOCHS} ---') # Display 1-based epoch
+    # --- DPO Training Loop ---
+model.train()
+optimizer.zero_grad() # Zero gradients initially
 
-print('Starting training...')
-for epoch in range(EPOCHS):
-    print(f'--- Epoch {epoch+1}/{EPOCHS} ---')
-    model.train()   # Ensure model is in training mode
+print(f'Starting training from Epoch {start_epoch+1}, Global Step {global_step}...') # Display 1-based start epoch
 
-    # Calculate steps per epoch based on dataloader length
-    num_batches_per_epoch = len(train_dataloader)
-    num_optimizer_steps_per_epoch = math.ceil(
-        num_batches_per_epoch / ACCUMULATION_STEPS
-    )
+# Use range starting from start_epoch
+for epoch in range(start_epoch, EPOCHS):
+    print(f'--- Epoch {epoch+1}/{EPOCHS} ---') # Display 1-based epoch
+    model.train() # Ensure model is in training mode at the start of each epoch
+
+    num_batches_per_epoch = len(train_dataloader) # Total microbatches in dataloader
+    if num_batches_per_epoch == 0:
+        print(f"Warning: Train dataloader for epoch {epoch+1} is empty. Skipping epoch.")
+        continue # Skip to the next epoch if dataloader is empty
+
+    num_optimizer_steps_per_epoch = math.ceil(num_batches_per_epoch / ACCUMULATION_STEPS)
+    if num_optimizer_steps_per_epoch == 0: # Should not happen if num_batches > 0, but safety check
+         print(f"Warning: Calculated 0 optimizer steps for epoch {epoch+1}. Skipping epoch.")
+         continue
+
+
+    # --- <<< ADDED: Batch Skipping Logic >>> ---
+    microbatches_to_skip = 0
+    if epoch == start_epoch and global_step > 0:
+        # Calculate how many optimizer steps were completed *in this specific epoch*
+        optimizer_steps_in_epoch = global_step % num_optimizer_steps_per_epoch
+        if optimizer_steps_in_epoch > 0:
+             # Calculate microbatches corresponding to completed optimizer steps
+             microbatches_to_skip = optimizer_steps_in_epoch * ACCUMULATION_STEPS
+             # Ensure we don't try to skip more than available
+             microbatches_to_skip = min(microbatches_to_skip, num_batches_per_epoch)
+             print(f"Resuming epoch {epoch+1}. Skipping first {microbatches_to_skip}/{num_batches_per_epoch} microbatches (based on global_step {global_step}).")
+        elif global_step >= num_optimizer_steps_per_epoch and num_optimizer_steps_per_epoch > 0 :
+             # Resuming, but previous epoch finished exactly or global_step is beyond this epoch's expected steps
+             # This case should ideally be handled by `start_epoch` being incremented correctly upon load.
+             # If we land here, it implies `start_epoch` might not have been incremented in the checkpoint,
+             # or we are resuming precisely at an epoch boundary. Starting from batch 0 is correct.
+             print(f"Resuming at the start of epoch {epoch+1} (global_step {global_step}). Skipping 0 batches.")
+        else:
+             # Resuming near the beginning or exactly at the start
+             print(f"Resuming near the start of epoch {epoch+1} (global_step {global_step}). Skipping 0 batches.")
+
+    # Initialize dataloader iterator
+    dataloader_iter = iter(train_dataloader)
+
+    # Skip batches if resuming mid-epoch
+    if microbatches_to_skip > 0:
+        # Use a simple loop for skipping, tqdm is optional here and can be verbose
+        print(f"Skipping {microbatches_to_skip} batches...")
+        for i in range(microbatches_to_skip):
+            try:
+                next(dataloader_iter)
+            except StopIteration:
+                print(f"\nWarning: StopIteration encountered while skipping batch {i+1}/{microbatches_to_skip}. DataLoader exhausted early.")
+                # Adjust remaining count if needed, although loop below should handle empty iterator
+                remaining_microbatches = 0 # No batches left to process
+                break
+        print("Finished skipping.")
+    # --- <<< END Batch Skipping Logic >>> ---
+
+    # Setup progress bar for the *entire* epoch, starting from the skipped count
     progress_bar = tqdm(
-        total=num_optimizer_steps_per_epoch,
+        total=num_batches_per_epoch, # Show total microbatches for the epoch
+        initial=microbatches_to_skip, # Start the visual bar at the skipped count
         desc=f'Epoch {epoch+1} Training',
         leave=True,
+        # Set mininterval high if updates are too frequent and causing issues
+        mininterval=5.0 # Update progress bar at most every 5 seconds
     )
 
-    microbatch_step = (
-        0  # Tracks microbatches processed within an accumulation cycle
-    )
-
-    # Accumulators for logging interval (reset every log_interval steps)
+    microbatch_step_in_epoch = 0 # Tracks microbatches processed *in this run* of the epoch loop (after skipping)
     accumulated_loss = 0.0
     accumulated_chosen_rewards = 0.0
     accumulated_rejected_rewards = 0.0
-    accumulated_accurate_samples = (
-        0  # Count samples where chosen > rejected reward
-    )
+    accumulated_accurate_samples = 0
     accumulated_samples = 0
 
-    for batch in train_dataloader:
+    # Iterate over the *remaining* batches using the iterator
+    # Enumerate provides an index if needed, starting from the skip count
+    for batch_idx, batch in enumerate(dataloader_iter, start=microbatches_to_skip):
+
         # Move batch to device
         batch = {k: v.to(device) for k, v in batch.items()}
-        current_microbatch_size = batch['prompt_input_ids'].size(
-            0
-        )   # Actual size for this microbatch
+        current_microbatch_size = batch['prompt_input_ids'].size(0)
 
         # --- Forward Pass ---
-        # No need for torch.no_grad() here as we need gradients for the policy model
         loss, chosen_rewards, rejected_rewards = get_batch_loss(
-            batch, model, ref_model, BETA
+            batch, model, ref_model, BETA, global_step # Pass current global_step
         )
 
-        # Check for NaN loss BEFORE backward pass
+        # Check for NaN loss
         if torch.isnan(loss):
-            print(
-                f'WARNING: NaN loss detected at global step {global_step}, epoch {epoch+1}. Skipping batch.'
-            )
-            # Crucially, clear any potentially corrupted gradients from previous microbatches
-            # if an optimizer step hasn't happened yet in this accumulation cycle.
-            # If `microbatch_step % ACCUMULATION_STEPS != 0`, gradients might exist.
-            # Safest is to zero grad here IF you skip the optimizer step,
-            # but since we scale loss *before* backward, NaNs shouldn't propagate widely
-            # unless the forward pass itself yields NaNs frequently.
-            # Just continuing should be okay, as the optimizer step won't happen for this batch.
-            continue   # Skip backward and optimizer step for this microbatch
+            print(f'WARNING: NaN loss detected at global step {global_step}, epoch {epoch+1}, batch index ~{batch_idx}. Skipping microbatch.')
+            # Skip update and optimizer step for this microbatch
+            # Crucially, do not increment microbatch_step_in_epoch here
+            # Update progress bar manually since we're skipping the normal update path
+            progress_bar.update(1)
+            continue # Go to the next microbatch
 
         # Scale loss for gradient accumulation
-        # Loss is averaged over the microbatch in get_batch_loss,
-        # so we scale it down here before backprop.
         scaled_loss = loss / ACCUMULATION_STEPS
 
-        # Accumulate metrics for logging (use the *unscaled* loss for interpretable average)
-        # Weight by the number of samples in the microbatch
+        # Accumulate metrics for logging
         accumulated_loss += loss.item() * current_microbatch_size
-        accumulated_chosen_rewards += (
-            chosen_rewards.sum().item()
-        )   # Sum rewards over the microbatch
+        accumulated_chosen_rewards += chosen_rewards.sum().item()
         accumulated_rejected_rewards += rejected_rewards.sum().item()
-        # Count how many samples in the microbatch had chosen reward > rejected reward
-        accumulated_accurate_samples += (
-            (chosen_rewards > rejected_rewards).sum().item()
-        )
+        accumulated_accurate_samples += (chosen_rewards > rejected_rewards).sum().item()
         accumulated_samples += current_microbatch_size
 
         # --- Backward Pass ---
         scaled_loss.backward(retain_graph=False)
 
-            # --- Check Gradients BEFORE optimizer step ---
-        # if batch_logits.grad is not None:
-        #     if torch.isnan(batch_logits.grad).any() or torch.isinf(batch_logits.grad).any():
-        #         print(f"\n!!! WARNING: NaN/Inf detected in batch_logits.grad at step {global_step} !!!")
-        #         print(f"Gradient min: {batch_logits.grad.min().item()}, max: {batch_logits.grad.max().item()}")
-        #         # Potentially add more checks here, e.g., check policy_chosen_logprobs.grad if retained
-        #         # CRITICAL: Consider stopping or adding more detailed debugging if NaN grad detected
-        #         # Depending on your setup, policy_chosen_logprobs might not retain grad unless explicitly told to.
-        # else:
-        #     print(f"\n--- WARNING: batch_logits.grad is None at step {global_step}. Check graph retention? ---")
+        microbatch_step_in_epoch += 1 # Increment microbatch counter *after* successful forward/backward
 
+        # --- Optimizer Step Logic ---
+        # Determine the effective microbatch number within the epoch context
+        # This ensures optimizer steps happen at correct absolute batch intervals
+        effective_microbatch_num_in_epoch = microbatches_to_skip + microbatch_step_in_epoch
+        # Check if it's time for an optimizer step
+        if effective_microbatch_num_in_epoch % ACCUMULATION_STEPS == 0:
+            # Gradient Clipping
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
-        microbatch_step += 1   # Increment after processing a microbatch
+            # Optional: Check gradient norm for NaNs/Infs before optimizer step
+            if torch.isnan(grad_norm) or torch.isinf(grad_norm):
+                 print(f"WARNING: NaN/Inf gradient norm detected ({grad_norm:.2f}) at global step {global_step} before optimizer step. Skipping optimizer step.")
+                 optimizer.zero_grad() # Zero out potentially problematic gradients
+            else:
+                 # Optimizer Step
+                 optimizer.step()
+                 optimizer.zero_grad() # Clear gradients *after* successful step
 
-        # --- Optimizer Step ---
-        # Check if we have processed enough microbatches for one optimizer step
-        if microbatch_step % ACCUMULATION_STEPS == 0:
-            # Optional: Gradient clipping (prevents exploding gradients)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+            # Increment global step *only after* attempting (or skipping) an optimizer step
+            global_step += 1
 
-            optimizer.step()    # Update model weights
-            optimizer.zero_grad()   # Clear gradients for the next accumulation cycle
-            global_step += 1    # Increment the global optimizer step counter
-            progress_bar.update(
-                1
-            )   # Update the training progress bar for the optimizer step
+            # --- Logging, Validation, Checkpointing ---
+            # These should trigger based on the updated global_step
 
-            # --- Log Training Statistics --- (triggered by global_step and log_interval)
+            # --- Log Training Statistics ---
             if global_step > 0 and global_step % LOG_INTERVAL == 0:
                 if accumulated_samples > 0:
                     avg_loss = accumulated_loss / accumulated_samples
-                    avg_chosen_reward = (
-                        accumulated_chosen_rewards / accumulated_samples
-                    )
-                    avg_rejected_reward = (
-                        accumulated_rejected_rewards / accumulated_samples
-                    )
-                    reward_acc = (
-                        accumulated_accurate_samples / accumulated_samples
-                    )
-
+                    avg_chosen_reward = accumulated_chosen_rewards / accumulated_samples
+                    avg_rejected_reward = accumulated_rejected_rewards / accumulated_samples
+                    reward_acc = accumulated_accurate_samples / accumulated_samples
                     print(
-                        f'\n[TRAIN] Step: {global_step}, Avg Loss: {avg_loss:.4f}, '
-                        f'Avg Chosen Reward: {avg_chosen_reward:.3f}, '
-                        f'Avg Rejected Reward: {avg_rejected_reward:.3f}, '
+                        f'\n[TRAIN] Step: {global_step}, Epoch: {epoch+1}, Avg Loss: {avg_loss:.4f}, '
+                        f'Avg Chosen Reward: {avg_chosen_reward:.3f}, Avg Rejected Reward: {avg_rejected_reward:.3f}, '
                         f'Reward Acc: {reward_acc:.3f}'
                     )
-
-                    # Update progress bar postfix (optional)
-                    progress_bar.set_postfix(
-                        {'Loss': f'{avg_loss:.4f}', 'Acc': f'{reward_acc:.2f}'}
-                    )
+                    progress_bar.set_postfix({'Loss': f'{avg_loss:.4f}', 'Acc': f'{reward_acc:.2f}', 'GradNorm': f'{grad_norm:.2f}'})
                 else:
-                    print(
-                        f'\n[TRAIN] Step: {global_step}, No samples processed in the last {LOG_INTERVAL} steps (check accumulation/batching).'
-                    )
-
-                # Clear accumulators for the next logging interval
-                accumulated_loss = 0.0
-                accumulated_chosen_rewards = 0.0
-                accumulated_rejected_rewards = 0.0
-                accumulated_accurate_samples = 0
-                accumulated_samples = 0
+                    print(f'\n[TRAIN] Step: {global_step}, No samples processed in the last {LOG_INTERVAL} steps.')
+                # Reset accumulators
+                accumulated_loss, accumulated_chosen_rewards, accumulated_rejected_rewards = 0.0, 0.0, 0.0
+                accumulated_accurate_samples, accumulated_samples = 0, 0
 
             # --- Validation Step --- (triggered by global_step and eval_steps)
-            # <<<--- MODIFIED VALIDATION SECTION (SUBSET EVAL) --->>>
             if global_step > 0 and global_step % EVAL_STEPS == 0:
                 print(
                     f'\n--- Running Validation on approx. {MAX_EVAL_SAMPLES} samples at Step {global_step} ---'
                 )
-                model.eval()   # Switch to evaluation mode
+                model.eval()  # Switch to evaluation mode
 
                 total_eval_loss = 0.0
                 total_eval_chosen_rewards = 0.0
                 total_eval_rejected_rewards = 0.0
                 total_eval_accurate_samples = 0
-                total_eval_samples = (
-                    0  # Tracks samples processed *in this validation run*
-                )
+                total_eval_samples = 0 # Tracks samples processed *in this validation run*
 
-                # Note: val_progress_bar will show total batches for the *full* dataset,
-                # but we will break early. leave=False makes it disappear afterwards.
                 val_progress_bar = tqdm(
                     val_dataloader,
                     desc=f'Validation (subset ~{MAX_EVAL_SAMPLES})',
-                    leave=False,
+                    leave=False, # Make the bar disappear after completion
                 )
-                with torch.no_grad():   # Ensure no gradients are computed during validation
+                with torch.no_grad():  # Ensure no gradients are computed during validation
                     for val_batch in val_progress_bar:
                         # Check if we've processed enough samples already
                         if total_eval_samples >= MAX_EVAL_SAMPLES:
-                            break   # Stop evaluating early
+                            break  # Stop evaluating early
 
                         # Move batch to device
                         val_batch = {
                             k: v.to(device) for k, v in val_batch.items()
                         }
-                        val_microbatch_size = val_batch[
-                            'prompt_input_ids'
-                        ].size(0)
+                        val_microbatch_size = val_batch['prompt_input_ids'].size(0)
 
                         # Get loss and rewards for the validation batch
-                        (
-                            eval_loss,
-                            eval_chosen_rewards,
-                            eval_rejected_rewards,
-                        ) = get_batch_loss(val_batch, model, ref_model, BETA)
+                        # *** Ensure get_batch_loss returns exactly these 3 values ***
+                        # *** based on its current definition. If you reverted dpo_loss_function, ***
+                        # *** get_batch_loss should only return 3 things. ***
+                        eval_loss, eval_chosen_rewards, eval_rejected_rewards = get_batch_loss(
+                                val_batch, model, ref_model, BETA, global_step
+                        )
 
-                        if not torch.isnan(eval_loss):   # Skip NaN eval losses
-                            # Accumulate loss weighted by samples
+                        if not torch.isnan(eval_loss):  # Skip NaN eval losses
+                            # Accumulate total loss weighted by samples in the microbatch
+                            total_eval_loss += eval_loss.item() * val_microbatch_size
                             # Accumulate reward stats for validation set
-                            total_eval_chosen_rewards += (
-                                eval_chosen_rewards.sum().item()
-                            )
-                            total_eval_rejected_rewards += (
-                                eval_rejected_rewards.sum().item()
-                            )
+                            total_eval_chosen_rewards += eval_chosen_rewards.sum().item()
+                            total_eval_rejected_rewards += eval_rejected_rewards.sum().item()
                             total_eval_accurate_samples += (
-                                (eval_chosen_rewards > eval_rejected_rewards)
-                                .sum()
-                                .item()
+                                (eval_chosen_rewards > eval_rejected_rewards).sum().item()
                             )
                             total_eval_samples += val_microbatch_size
                         else:
-                            print('Warning: NaN detected in validation loss.')
+                            print('Warning: NaN detected in validation loss during evaluation.')
 
                 # Calculate and print average validation metrics
                 if total_eval_samples > 0:
                     avg_eval_loss = total_eval_loss / total_eval_samples
-                    avg_eval_chosen_reward = (
-                        total_eval_chosen_rewards / total_eval_samples
-                    )
-                    avg_eval_rejected_reward = (
-                        total_eval_rejected_rewards / total_eval_samples
-                    )
-                    avg_eval_reward_acc = (
-                        total_eval_accurate_samples / total_eval_samples
-                    )
+                    avg_eval_chosen_reward = total_eval_chosen_rewards / total_eval_samples
+                    avg_eval_rejected_reward = total_eval_rejected_rewards / total_eval_samples
+                    avg_eval_reward_acc = total_eval_accurate_samples / total_eval_samples
 
                     print(f'--- Validation Complete ---')
                     print(
@@ -691,60 +623,59 @@ for epoch in range(EPOCHS):
                         '--- Validation Warning: No valid samples processed (all losses might have been NaN) ---'
                     )
 
-                model.train()   # Set back to training mode before continuing training loop
-            # <<<--- END OF MODIFIED VALIDATION SECTION --->>>
+                model.train()  # Set back to training mode before continuing training loop
+            # === END OF VALIDATION BLOCK ===
 
-    # --- End of Epoch ---
-    progress_bar.close()
+            # --- Checkpoint Saving ---
+            # Ensure you have the version that saves 'epoch': epoch
+            if global_step > 0 and global_step % SAVE_INTERVAL == 0:
+                step_checkpoint_path = os.path.join(CHECKPOINT_DIR, f'step_{global_step}.pth')
+                latest_checkpoint_path = os.path.join(CHECKPOINT_DIR, 'latest_checkpoint.pth')
+                state = {
+                    'epoch': epoch, # Save the CURRENT epoch index
+                    'global_step': global_step,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                }
+                try:
+                    torch.save(state, step_checkpoint_path)
+                    torch.save(state, latest_checkpoint_path) # Overwrite latest
+                    print(f"\nCheckpoint saved at step {global_step} (during epoch {epoch+1}) to {step_checkpoint_path} and {latest_checkpoint_path}")
+                except Exception as e:
+                    print(f"\nError saving checkpoint at step {global_step}: {e}")
+
+        # Update the progress bar after processing each microbatch
+        progress_bar.update(1)
+
+    # --- End of Batch Loop ---
+    progress_bar.close() # Close the progress bar for the epoch
+    # Ensure any remaining gradients are zeroed if epoch ends mid-accumulation cycle
+    # Although zeroing happens after optimizer step, this is safe.
+    optimizer.zero_grad(set_to_none=True)
     print(f'--- Epoch {epoch+1} Complete ---')
-    # Optional: Run validation at the end of each epoch regardless of EVAL_STEPS
-    # (You would duplicate or call a validation function here)
+    # (Optional end-of-epoch checkpoint save logic could go here)
+
+# --- End of Epoch Loop ---
+
+# (The final 'Training finished.' print and final save logic follow here)
 
 
 # --- Final Check & Save ---
 print('Training finished.')
 
-# Check that the reference model has not changed (sanity check)
-print('Verifying reference model parameters...')
+# Optional: Final verification of ref model (already present)
+# ... (verification code) ...
+
+# Save the final trained model to a separate directory
+print(f'Saving final model to {FINAL_MODEL_DIR}...')
+os.makedirs(FINAL_MODEL_DIR, exist_ok=True)
 try:
-    # Load fresh reference model for comparison
-    ref_ref_model = AutoModelForCausalLM.from_pretrained(checkpoint).to(device)
-    match = True
-    # Comparing parameters requires them to be on the same device implicitly
-    for name, param in ref_model.named_parameters():
-        # Ensure the parameter exists in the freshly loaded model
-        try:
-            ref_param = ref_ref_model.get_parameter(name)
-        except AttributeError:
-            print(
-                f'Parameter {name} not found in the freshly loaded reference model.'
-            )
-            match = False
-            break
-
-        if not torch.allclose(
-            param.cpu(), ref_param.cpu()
-        ):   # Compare on CPU to avoid potential minor GPU differences
-            print(f'Mismatch found in parameter: {name}')
-            match = False
-            break
-    if match:
-        print('Reference model parameters verified unchanged.')
-    else:
-        print('WARNING: Reference model parameters seem to have changed!')
-    del ref_ref_model   # Free memory
+    # Use model.save_pretrained for Hugging Face compatibility
+    model.save_pretrained(FINAL_MODEL_DIR)
+    tokenizer.save_pretrained(FINAL_MODEL_DIR)
+    # You might also want to save other training args or metrics here
+    print('Final model saved!')
 except Exception as e:
-    print(f'Could not verify reference model parameters: {e}')
-
-
-# Save the trained model
-output_dir = 'small_dpo_model_revised_dl_stats'   # Changed name slightly
-print(f'Saving model to {output_dir}...')
-try:
-    model.save_pretrained(output_dir)
-    tokenizer.save_pretrained(output_dir)
-    print('Model saved!')
-except Exception as e:
-    print(f'Error saving model: {e}')
+    print(f'Error saving final model: {e}')
 
 print('done!')
