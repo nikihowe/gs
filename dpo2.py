@@ -37,9 +37,9 @@ MAX_EVAL_SAMPLES = 300
 MAX_LENGTH = 512       # Define a max sequence length for padding/truncation
 NUM_WORKERS = 4  # Number of workers for DataLoader (adjust based on system)
 LOG_INTERVAL = 10      # Log accumulated train loss every N optimizer steps (adjusted for less noise)
-CHECKPOINT_DIR = './large_dpo_checkpoints'  # Directory to save checkpoints
+CHECKPOINT_DIR = './test_checkpoints'  # Directory to save checkpoints
 FINAL_MODEL_DIR = (
-    './large_long_dpo_final_model'  # Directory for the final trained model
+    './test_final_model'  # Directory for the final trained model
 )
 TRAIN_DATASET_SIZE = 40000
 
@@ -164,14 +164,12 @@ print('Loading datasets...')
 hf_train_dataset_full = get_the_datasets(
     tokenizer,
     max_length=MAX_LENGTH,
-    data_dir='.',
     processed_cache_base='/tmp',  # Keep processed data fast if desired
 )
 hf_test_dataset = get_the_datasets(
     tokenizer,
     max_length=MAX_LENGTH,
     test=True,
-    data_dir='.',
     processed_cache_base='/tmp',
 )
 print('Full datasets loaded.')
@@ -355,20 +353,6 @@ def get_batch_loss(
     )
 
     # --- Create masks needed for log prob extraction ---
-    prompt_only_mask_chosen = torch.cat(
-        [
-            batch['prompt_attention_mask'],
-            torch.zeros_like(batch['chosen_attention_mask']),
-        ],
-        dim=-1,
-    )
-    prompt_only_mask_rejected = torch.cat(
-        [
-            batch['prompt_attention_mask'],
-            torch.zeros_like(batch['rejected_attention_mask']),
-        ],
-        dim=-1,
-    )
     completion_only_mask_chosen = torch.cat(
         [
             torch.zeros_like(batch['prompt_attention_mask']),
@@ -436,14 +420,12 @@ def get_batch_loss(
     policy_chosen_logprobs = extract_log_probs(
         policy_chosen_outputs.logits,
         concat_chosen_ids,
-        prompt_only_mask_chosen,
         completion_only_mask_chosen,
         current_global_step,
     )
     policy_rejected_logprobs = extract_log_probs(
         policy_rejected_outputs.logits,
         concat_rejected_ids,
-        prompt_only_mask_rejected,
         completion_only_mask_rejected,
         current_global_step,
     )
@@ -451,14 +433,12 @@ def get_batch_loss(
         ref_chosen_logprobs = extract_log_probs(
             ref_chosen_outputs.logits,
             concat_chosen_ids,
-            prompt_only_mask_chosen,
             completion_only_mask_chosen,
             current_global_step,
         )
         ref_rejected_logprobs = extract_log_probs(
             ref_rejected_outputs.logits,
             concat_rejected_ids,
-            prompt_only_mask_rejected,
             completion_only_mask_rejected,
             current_global_step,
         )
