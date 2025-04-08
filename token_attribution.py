@@ -1,10 +1,10 @@
+import json
+
 import torch
 from colorama import Fore, Style
 from transformers import AutoModelForCausalLM, AutoTokenizer
-import json
 
 from constants import ACCEPTANCE, REJECTION
-
 
 # ------------------------------------------------------------------------------------------------
 # Token attribution. You need to implement this

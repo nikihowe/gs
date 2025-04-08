@@ -1,9 +1,10 @@
+import json
+import os
+
 import torch
+import torch.nn.functional as F
 from colorama import Fore, Style
 from transformers import AutoModelForCausalLM, AutoTokenizer
-import json
-import torch.nn.functional as F
-import os
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(f'Using device: {device}')
@@ -228,8 +229,9 @@ def token_attribution(
 # Make sure the __main__ block calls this updated token_attribution function.
 # --------------------------------------------------------------------------
 
-import torch   # Ensure torch is imported if used for isfinite check
-from colorama import Fore, Style, init as colorama_init
+import torch  # Ensure torch is imported if used for isfinite check
+from colorama import Fore, Style
+from colorama import init as colorama_init
 
 # Initialize colorama if not done globally
 # colorama_init(autoreset=True)

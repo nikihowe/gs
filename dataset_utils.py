@@ -1,8 +1,7 @@
-from datasets import Dataset
-from datasets import load_dataset, load_from_disk
 from transformers import PreTrainedTokenizer
 
 from constants import TIME_SIZE
+from datasets import Dataset, load_dataset, load_from_disk
 
 
 # Inspired by https://github.com/phymhan/llm-dpo/blob/41ddeaea2782f7f5c6d79b9f2041a91921aadbd0/preference_datasets.py#L14  # noqa: E501

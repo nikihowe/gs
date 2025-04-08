@@ -1,6 +1,6 @@
-from vllm import LLM, SamplingParams
 import json
 
+from vllm import LLM, SamplingParams
 
 REPLACE_TOKEN = '<|REPLACE|>'
 SAMPLING_PARAMS = SamplingParams(

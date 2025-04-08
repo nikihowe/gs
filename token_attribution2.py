@@ -1,10 +1,12 @@
-import torch
-from colorama import Fore, Style, init as colorama_init
-from transformers import AutoModelForCausalLM, AutoTokenizer
 import json
-import torch.nn.functional as F
+import math  # For isnan/isfinite checks if needed
 import os
-import math   # For isnan/isfinite checks if needed
+
+import torch
+import torch.nn.functional as F
+from colorama import Fore, Style
+from colorama import init as colorama_init
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 # Initialize colorama
 colorama_init(autoreset=True)
