@@ -100,7 +100,8 @@ def filter_dpo_dataset_by_response_length(
 
     print(
         f'Filtering dataset with {initial_count} examples by response length (must be > 0'
-        + (f' and <= {max_response_length}' if max_response_length > 0 else '') + ')...'
+        + (f' and <= {max_response_length}' if max_response_length > 0 else '')
+        + ')...'
     )
 
     # Define function to check length
@@ -115,7 +116,9 @@ def filter_dpo_dataset_by_response_length(
 
         # Tokenize (without adding special tokens for length check)
         chosen_tokens = tokenizer.encode(chosen_text, add_special_tokens=False)
-        rejected_tokens = tokenizer.encode(rejected_text, add_special_tokens=False)
+        rejected_tokens = tokenizer.encode(
+            rejected_text, add_special_tokens=False
+        )
 
         len_chosen = len(chosen_tokens)
         len_rejected = len(rejected_tokens)
@@ -124,7 +127,10 @@ def filter_dpo_dataset_by_response_length(
         # Ensure length is strictly positive AND respects max_length (if specified)
         is_len_ok = len_chosen > 0 and len_rejected > 0
         if max_response_length > 0:
-             is_len_ok = is_len_ok and (len_chosen <= max_response_length and len_rejected <= max_response_length)
+            is_len_ok = is_len_ok and (
+                len_chosen <= max_response_length
+                and len_rejected <= max_response_length
+            )
         # --- END MODIFICATION ---
 
         return is_len_ok
@@ -132,8 +138,10 @@ def filter_dpo_dataset_by_response_length(
     # Use filter directly
     try:
         # Determine num_proc safely
-        num_proc = min(os.cpu_count(), 8) # Limit cpu usage somewhat if many cores
-        print(f"Using {num_proc} processes for filtering...")
+        num_proc = min(
+            os.cpu_count(), 8
+        )   # Limit cpu usage somewhat if many cores
+        print(f'Using {num_proc} processes for filtering...')
         filtered_dataset = dataset.filter(
             is_response_length_ok, num_proc=num_proc
         )
@@ -143,11 +151,15 @@ def filter_dpo_dataset_by_response_length(
         )
         # Fallback to single-process filtering
         try:
-            print("Retrying filtering with num_proc=1...")
-            filtered_dataset = dataset.filter(is_response_length_ok, num_proc=1)
+            print('Retrying filtering with num_proc=1...')
+            filtered_dataset = dataset.filter(
+                is_response_length_ok, num_proc=1
+            )
         except Exception as e2:
-            print(f'Single-process filtering also failed: {e2}. Returning unfiltered.')
-            return dataset # Return unfiltered on error
+            print(
+                f'Single-process filtering also failed: {e2}. Returning unfiltered.'
+            )
+            return dataset   # Return unfiltered on error
 
     final_count = len(filtered_dataset)
     num_removed = initial_count - final_count
@@ -171,7 +183,7 @@ def get_the_datasets(
     force_reprocess: bool = False,  # Add option to force reprocessing
     data_dir: str = '.',  # Base directory for *source* data or *persistent* cache (kept for potential future use)
     # New argument for cache location, defaults to /tmp
-    processed_cache_base: str = '/tmp' # <--- ADDED ARGUMENT (or hardcode '/tmp')
+    processed_cache_base: str = '/tmp',  # <--- ADDED ARGUMENT (or hardcode '/tmp')
 ) -> Dataset:
     """
     Loads/processes HH dataset into DPO format with 'prompt', 'chosen', 'rejected' text columns.
@@ -183,9 +195,10 @@ def get_the_datasets(
     # --- MODIFIED PATH DEFINITION ---
     # Define path for the processed TEXT dataset within the specified cache base
     processed_text_save_path = os.path.join(
-        processed_cache_base, f'dpo_{dset_type}_text_dataset_ml{max_length}' # Added max_length to name
+        processed_cache_base,
+        f'dpo_{dset_type}_text_dataset_ml{max_length}',  # Added max_length to name
     )
-    print(f"Using processed dataset cache path: {processed_text_save_path}")
+    print(f'Using processed dataset cache path: {processed_text_save_path}')
     # --- END MODIFICATION ---
 
     if not force_reprocess:
@@ -242,10 +255,10 @@ def get_the_datasets(
         print(
             f'Warning: DPOification resulted in empty {dset_type} dataset. Check source data and extraction logic.'
         )
-        return dpo_text_dataset # Return empty
+        return dpo_text_dataset   # Return empty
 
     # --- Filtering based on DPO format (Now Active) ---
-    prompt_buffer = 10 # Consider making this dynamic or an argument
+    prompt_buffer = 10   # Consider making this dynamic or an argument
     filter_max_response_len = max_length - prompt_buffer
     print(
         f'Calculated max response length for filtering: {filter_max_response_len} (max_length={max_length}, buffer={prompt_buffer})'
@@ -279,24 +292,32 @@ def get_the_datasets(
         )
         try:
             # Ensure parent directory exists (e.g., /tmp/ might exist but maybe not /tmp/some_subdir/)
-            os.makedirs(os.path.dirname(processed_text_save_path), exist_ok=True)
+            os.makedirs(
+                os.path.dirname(processed_text_save_path), exist_ok=True
+            )
             # Save using the new path
             dpo_text_dataset.save_to_disk(processed_text_save_path)
             print('Dataset saved successfully.')
         except Exception as e:
-            print(f'Error saving processed dataset to {processed_text_save_path}: {e}')
+            print(
+                f'Error saving processed dataset to {processed_text_save_path}: {e}'
+            )
             # Decide if you want to raise the error or just continue without saving
             # raise e # Uncomment if saving failure should stop the process
     elif not force_reprocess and os.path.exists(processed_text_save_path):
-         # If we ended up with an empty dataset after processing, but a cached one exists
-         # (and we didn't force reprocess), maybe remove the invalid cache? Optional.
-         try:
-             print(f"Attempting to remove potentially invalid empty cache: {processed_text_save_path}")
-             import shutil
-             shutil.rmtree(processed_text_save_path)
-         except Exception as e_rm:
-             print(f"Warning: Failed to remove empty cache directory {processed_text_save_path}: {e_rm}")
+        # If we ended up with an empty dataset after processing, but a cached one exists
+        # (and we didn't force reprocess), maybe remove the invalid cache? Optional.
+        try:
+            print(
+                f'Attempting to remove potentially invalid empty cache: {processed_text_save_path}'
+            )
+            import shutil
 
+            shutil.rmtree(processed_text_save_path)
+        except Exception as e_rm:
+            print(
+                f'Warning: Failed to remove empty cache directory {processed_text_save_path}: {e_rm}'
+            )
 
     print(f'Final {dset_type} dataset has {len(dpo_text_dataset)} examples')
     # Return the dataset that has 'prompt', 'chosen', 'rejected' text columns

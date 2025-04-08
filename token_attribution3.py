@@ -328,17 +328,17 @@ def visualize_attribution(
 # Main Execution Block (Modified)
 # ==============================================================================
 if __name__ == '__main__':
-    colorama_init(autoreset=True) # Initialize colorama
+    colorama_init(autoreset=True)   # Initialize colorama
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f'Using device: {device}')
 
     # --- Configuration ---
-    checkpoint = 'HuggingFaceTB/SmolLM2-135M-Instruct'
-    # checkpoint = 'HuggingFaceTB/SmolLM2-1.7B-Instruct'
+    # checkpoint = 'HuggingFaceTB/SmolLM2-135M-Instruct'
+    checkpoint = 'HuggingFaceTB/SmolLM2-1.7B-Instruct'
     # trained_model_path = 'big_dpo_model'
     # trained_model_path = 'small_dpo_model_revised_dl_stats'
-    trained_model_path = 'long_dpo_final_model'
+    trained_model_path = 'large_long_dpo_final_model'
     dataset_path = './datasets/dataset.json'
     gen_max_length = 150
     num_good_to_show = 5  # Number of HARMLESS examples
@@ -358,7 +358,9 @@ if __name__ == '__main__':
         ).to(device)
         print(f'Loading tuned model from: {trained_model_path}')
         if not os.path.isdir(trained_model_path):
-            raise FileNotFoundError(f'Tuned model directory not found: {trained_model_path}')
+            raise FileNotFoundError(
+                f'Tuned model directory not found: {trained_model_path}'
+            )
         trained_model = AutoModelForCausalLM.from_pretrained(
             trained_model_path,
             trust_remote_code=True,
@@ -372,7 +374,9 @@ if __name__ == '__main__':
     if tokenizer.pad_token is None:
         if tokenizer.eos_token is not None:
             tokenizer.pad_token = tokenizer.eos_token
-            print(f'Set tokenizer pad_token to eos_token ({tokenizer.eos_token})')
+            print(
+                f'Set tokenizer pad_token to eos_token ({tokenizer.eos_token})'
+            )
         else:
             tokenizer.add_special_tokens({'pad_token': '[PAD]'})
             print("Added '[PAD]' as pad_token.")
@@ -395,43 +399,64 @@ if __name__ == '__main__':
         print(f'Error: Dataset file not found at {dataset_path}')
         exit(1)
     except json.JSONDecodeError as e:
-        print(f'Error: Could not decode JSON from {dataset_path}. Details: {e}')
+        print(
+            f'Error: Could not decode JSON from {dataset_path}. Details: {e}'
+        )
         exit(1)
     except Exception as e:
         print(f'An unexpected error occurred loading the dataset: {e}')
         exit(1)
 
     # Validate dataset structure
-    if not isinstance(dataset, dict) or 'text' not in dataset or 'harmful' not in dataset:
-        print("Error: Dataset JSON must be an object with 'text' and 'harmful' keys.")
+    if (
+        not isinstance(dataset, dict)
+        or 'text' not in dataset
+        or 'harmful' not in dataset
+    ):
+        print(
+            "Error: Dataset JSON must be an object with 'text' and 'harmful' keys."
+        )
         exit(1)
-    if not isinstance(dataset['text'], list) or not isinstance(dataset['harmful'], list):
+    if not isinstance(dataset['text'], list) or not isinstance(
+        dataset['harmful'], list
+    ):
         print("Error: Dataset 'text' and 'harmful' values must be lists.")
         exit(1)
     if len(dataset['text']) != len(dataset['harmful']):
-        print(f"Error: Dataset 'text' ({len(dataset['text'])}) and 'harmful' ({len(dataset['harmful'])}) lists must have the same length.")
+        print(
+            f"Error: Dataset 'text' ({len(dataset['text'])}) and 'harmful' ({len(dataset['harmful'])}) lists must have the same length."
+        )
         exit(1)
 
     print(f"Loaded dataset with {len(dataset['text'])} examples.")
 
     # --- Prepare Examples (Harmless and Harmful) ---
     good_examples = [
-        text for text, label in zip(dataset['text'], dataset['harmful'])
+        text
+        for text, label in zip(dataset['text'], dataset['harmful'])
         if isinstance(label, (int, float)) and label == 0
     ]
-    bad_examples = [ # Filter for harmful examples
-        text for text, label in zip(dataset['text'], dataset['harmful'])
-        if isinstance(label, (int, float)) and label == 1 # Label 1 indicates harmful
+    bad_examples = [  # Filter for harmful examples
+        text
+        for text, label in zip(dataset['text'], dataset['harmful'])
+        if isinstance(label, (int, float))
+        and label == 1  # Label 1 indicates harmful
     ]
 
     # Add standard prompt formatting
-    good_examples_prompts = ['Human: ' + str(text) + ' Assistant: ' for text in good_examples]
-    bad_examples_prompts = ['Human: ' + str(text) + ' Assistant: ' for text in bad_examples]
+    good_examples_prompts = [
+        'Human: ' + str(text) + ' Assistant: ' for text in good_examples
+    ]
+    bad_examples_prompts = [
+        'Human: ' + str(text) + ' Assistant: ' for text in bad_examples
+    ]
 
     num_available_good = len(good_examples_prompts)
     num_available_bad = len(bad_examples_prompts)
     print(f"Found {num_available_good} 'good' (harmless, label=0) examples.")
-    print(f"Found {num_available_bad} 'bad' (harmful, label=1) examples.") # Info about harmful count
+    print(
+        f"Found {num_available_bad} 'bad' (harmful, label=1) examples."
+    )   # Info about harmful count
 
     # Determine actual number to process based on availability
     actual_good_to_show = min(num_good_to_show, num_available_good)
@@ -442,7 +467,7 @@ if __name__ == '__main__':
         'num_return_sequences': 1,
         'eos_token_id': tokenizer.eos_token_id,
         'pad_token_id': tokenizer.pad_token_id,
-        'do_sample': False, # Use greedy decoding
+        'do_sample': False,  # Use greedy decoding
         'no_repeat_ngram_size': 3,
     }
 
@@ -453,7 +478,9 @@ if __name__ == '__main__':
         for i in range(actual_good_to_show):
             current_prompt = good_examples_prompts[i]
             print(f'\n--- Harmless Example {i+1} / {actual_good_to_show} ---')
-            print(f"Prompt: {current_prompt[:300]}{'...' if len(current_prompt)>300 else ''}")
+            print(
+                f"Prompt: {current_prompt[:300]}{'...' if len(current_prompt)>300 else ''}"
+            )
 
             base_model_completion = '[GENERATION SKIPPED]'
             tuned_model_completion = '[GENERATION SKIPPED]'
@@ -461,8 +488,11 @@ if __name__ == '__main__':
             # --- Generate Actual Completions ---
             try:
                 inputs_tokenized = tokenizer(
-                    current_prompt, return_tensors='pt', truncation=True,
-                    max_length=tokenizer.model_max_length - gen_max_length # Reserve space for generation
+                    current_prompt,
+                    return_tensors='pt',
+                    truncation=True,
+                    max_length=tokenizer.model_max_length
+                    - gen_max_length,  # Reserve space for generation
                 ).to(device)
                 current_input_len = len(inputs_tokenized['input_ids'][0])
                 gen_args = gen_args_base.copy()
@@ -475,9 +505,15 @@ if __name__ == '__main__':
                         attention_mask=inputs_tokenized.attention_mask,
                         **gen_args,
                     )
-                base_model_generated_ids = base_model_output[0, current_input_len:]
-                base_model_completion = tokenizer.decode(base_model_generated_ids, skip_special_tokens=True).strip()
-                print(f"Base Model Generated: '{base_model_completion[:150]}...'")
+                base_model_generated_ids = base_model_output[
+                    0, current_input_len:
+                ]
+                base_model_completion = tokenizer.decode(
+                    base_model_generated_ids, skip_special_tokens=True
+                ).strip()
+                print(
+                    f"Base Model Generated: '{base_model_completion[:150]}...'"
+                )
 
                 print('Generating tuned model response (Harmless)...')
                 with torch.no_grad():
@@ -486,62 +522,127 @@ if __name__ == '__main__':
                         attention_mask=inputs_tokenized.attention_mask,
                         **gen_args,
                     )
-                tuned_model_generated_ids = tuned_model_output[0, current_input_len:]
-                tuned_model_completion = tokenizer.decode(tuned_model_generated_ids, skip_special_tokens=True).strip()
-                print(f"Tuned Model Generated: '{tuned_model_completion[:150]}...'")
+                tuned_model_generated_ids = tuned_model_output[
+                    0, current_input_len:
+                ]
+                tuned_model_completion = tokenizer.decode(
+                    tuned_model_generated_ids, skip_special_tokens=True
+                ).strip()
+                print(
+                    f"Tuned Model Generated: '{tuned_model_completion[:150]}...'"
+                )
 
             except Exception as e:
-                print(f'Error during generation for harmless example {i+1}: {e}')
-                if base_model_completion == '[GENERATION SKIPPED]': base_model_completion = '[GENERATION ERROR]'
-                if tuned_model_completion == '[GENERATION SKIPPED]': tuned_model_completion = '[GENERATION ERROR]'
+                print(
+                    f'Error during generation for harmless example {i+1}: {e}'
+                )
+                if base_model_completion == '[GENERATION SKIPPED]':
+                    base_model_completion = '[GENERATION ERROR]'
+                if tuned_model_completion == '[GENERATION SKIPPED]':
+                    tuned_model_completion = '[GENERATION ERROR]'
 
             # --- Calculate Attributions ---
             base_model_attribution = []
             tuned_model_attribution = []
 
-            if base_model_completion and base_model_completion not in ['[GENERATION ERROR]', '[GENERATION SKIPPED]']:
-                print(f'\nCalculating attribution for BASE model (Harmless)...')
-                base_model_attribution = token_attribution(base_model, tokenizer, current_prompt, base_model_completion)
+            if base_model_completion and base_model_completion not in [
+                '[GENERATION ERROR]',
+                '[GENERATION SKIPPED]',
+            ]:
+                print(
+                    f'\nCalculating attribution for BASE model (Harmless)...'
+                )
+                base_model_attribution = token_attribution(
+                    base_model,
+                    tokenizer,
+                    current_prompt,
+                    base_model_completion,
+                )
             else:
                 print('\nSkipping base model attribution (Harmless).')
 
-            if tuned_model_completion and tuned_model_completion not in ['[GENERATION ERROR]', '[GENERATION SKIPPED]']:
+            if tuned_model_completion and tuned_model_completion not in [
+                '[GENERATION ERROR]',
+                '[GENERATION SKIPPED]',
+            ]:
                 print(f'Calculating attribution for TUNED model (Harmless)...')
-                tuned_model_attribution = token_attribution(trained_model, tokenizer, current_prompt, tuned_model_completion)
+                tuned_model_attribution = token_attribution(
+                    trained_model,
+                    tokenizer,
+                    current_prompt,
+                    tuned_model_completion,
+                )
             else:
                 print('Skipping tuned model attribution (Harmless).')
 
             # --- Visualize Attributions ---
             print('\n--- Attributions (Harmless) ---')
             if base_model_attribution:
-                valid_scores = [attr for _, attr in base_model_attribution if isinstance(attr, (int, float)) and torch.isfinite(torch.tensor(attr))]
-                max_base_attr = max(valid_scores) if valid_scores else 1.0 # Avoid division by zero
-                print(f'DEBUG: Raw Base Attr Scores (first 10): {base_model_attribution[:10]}')
-                print('Base model: ', visualize_attribution(base_model_attribution, max_attr=max_base_attr), base_model_completion)
+                valid_scores = [
+                    attr
+                    for _, attr in base_model_attribution
+                    if isinstance(attr, (int, float))
+                    and torch.isfinite(torch.tensor(attr))
+                ]
+                max_base_attr = (
+                    max(valid_scores) if valid_scores else 1.0
+                )   # Avoid division by zero
+                print(
+                    f'DEBUG: Raw Base Attr Scores (first 10): {base_model_attribution[:10]}'
+                )
+                print(
+                    'Base model: ',
+                    visualize_attribution(
+                        base_model_attribution, max_attr=max_base_attr
+                    ),
+                    base_model_completion,
+                )
             else:
-                print(f'Base model: [Attribution not calculated] {base_model_completion}')
+                print(
+                    f'Base model: [Attribution not calculated] {base_model_completion}'
+                )
 
             if tuned_model_attribution:
-                valid_scores = [attr for _, attr in tuned_model_attribution if isinstance(attr, (int, float)) and torch.isfinite(torch.tensor(attr))]
+                valid_scores = [
+                    attr
+                    for _, attr in tuned_model_attribution
+                    if isinstance(attr, (int, float))
+                    and torch.isfinite(torch.tensor(attr))
+                ]
                 max_tuned_attr = max(valid_scores) if valid_scores else 1.0
-                print(f'DEBUG: Raw Tuned Attr Scores (first 10): {tuned_model_attribution[:10]}')
-                print('Tuned model:', visualize_attribution(tuned_model_attribution, max_attr=max_tuned_attr), tuned_model_completion)
+                print(
+                    f'DEBUG: Raw Tuned Attr Scores (first 10): {tuned_model_attribution[:10]}'
+                )
+                print(
+                    'Tuned model:',
+                    visualize_attribution(
+                        tuned_model_attribution, max_attr=max_tuned_attr
+                    ),
+                    tuned_model_completion,
+                )
             else:
-                print(f'Tuned model: [Attribution not calculated] {tuned_model_completion}')
+                print(
+                    f'Tuned model: [Attribution not calculated] {tuned_model_completion}'
+                )
 
-            print('-' * 60) # Separator between examples
+            print('-' * 60)   # Separator between examples
     else:
-        print("\nNo harmless examples found or requested to process.")
-
+        print('\nNo harmless examples found or requested to process.')
 
     # === Process HARMFUL Examples ===
     if actual_bad_to_show > 0:
         print(f'\n=== Processing {actual_bad_to_show} HARMFUL Examples ===')
         print('=' * 60)
         for i in range(actual_bad_to_show):
-            current_prompt = bad_examples_prompts[i] # Use the harmful prompts list
-            print(f'\n--- Harmful Example {i+1} / {actual_bad_to_show} ---') # Indicate harmful
-            print(f"Prompt: {current_prompt[:300]}{'...' if len(current_prompt)>300 else ''}")
+            current_prompt = bad_examples_prompts[
+                i
+            ]   # Use the harmful prompts list
+            print(
+                f'\n--- Harmful Example {i+1} / {actual_bad_to_show} ---'
+            )   # Indicate harmful
+            print(
+                f"Prompt: {current_prompt[:300]}{'...' if len(current_prompt)>300 else ''}"
+            )
 
             base_model_completion = '[GENERATION SKIPPED]'
             tuned_model_completion = '[GENERATION SKIPPED]'
@@ -550,8 +651,11 @@ if __name__ == '__main__':
             # (This code block is identical to the harmless one, just uses the harmful prompt)
             try:
                 inputs_tokenized = tokenizer(
-                    current_prompt, return_tensors='pt', truncation=True,
-                    max_length=tokenizer.model_max_length - gen_max_length # Reserve space for generation
+                    current_prompt,
+                    return_tensors='pt',
+                    truncation=True,
+                    max_length=tokenizer.model_max_length
+                    - gen_max_length,  # Reserve space for generation
                 ).to(device)
                 current_input_len = len(inputs_tokenized['input_ids'][0])
                 gen_args = gen_args_base.copy()
@@ -564,9 +668,15 @@ if __name__ == '__main__':
                         attention_mask=inputs_tokenized.attention_mask,
                         **gen_args,
                     )
-                base_model_generated_ids = base_model_output[0, current_input_len:]
-                base_model_completion = tokenizer.decode(base_model_generated_ids, skip_special_tokens=True).strip()
-                print(f"Base Model Generated: '{base_model_completion[:150]}...'")
+                base_model_generated_ids = base_model_output[
+                    0, current_input_len:
+                ]
+                base_model_completion = tokenizer.decode(
+                    base_model_generated_ids, skip_special_tokens=True
+                ).strip()
+                print(
+                    f"Base Model Generated: '{base_model_completion[:150]}...'"
+                )
 
                 print('Generating tuned model response (Harmful)...')
                 with torch.no_grad():
@@ -575,54 +685,107 @@ if __name__ == '__main__':
                         attention_mask=inputs_tokenized.attention_mask,
                         **gen_args,
                     )
-                tuned_model_generated_ids = tuned_model_output[0, current_input_len:]
-                tuned_model_completion = tokenizer.decode(tuned_model_generated_ids, skip_special_tokens=True).strip()
-                print(f"Tuned Model Generated: '{tuned_model_completion[:150]}...'")
+                tuned_model_generated_ids = tuned_model_output[
+                    0, current_input_len:
+                ]
+                tuned_model_completion = tokenizer.decode(
+                    tuned_model_generated_ids, skip_special_tokens=True
+                ).strip()
+                print(
+                    f"Tuned Model Generated: '{tuned_model_completion[:150]}...'"
+                )
 
             except Exception as e:
-                print(f'Error during generation for harmful example {i+1}: {e}')
-                if base_model_completion == '[GENERATION SKIPPED]': base_model_completion = '[GENERATION ERROR]'
-                if tuned_model_completion == '[GENERATION SKIPPED]': tuned_model_completion = '[GENERATION ERROR]'
-
+                print(
+                    f'Error during generation for harmful example {i+1}: {e}'
+                )
+                if base_model_completion == '[GENERATION SKIPPED]':
+                    base_model_completion = '[GENERATION ERROR]'
+                if tuned_model_completion == '[GENERATION SKIPPED]':
+                    tuned_model_completion = '[GENERATION ERROR]'
 
             # --- Calculate Attributions ---
             base_model_attribution = []
             tuned_model_attribution = []
 
-            if base_model_completion and base_model_completion not in ['[GENERATION ERROR]', '[GENERATION SKIPPED]']:
+            if base_model_completion and base_model_completion not in [
+                '[GENERATION ERROR]',
+                '[GENERATION SKIPPED]',
+            ]:
                 print(f'\nCalculating attribution for BASE model (Harmful)...')
-                base_model_attribution = token_attribution(base_model, tokenizer, current_prompt, base_model_completion)
+                base_model_attribution = token_attribution(
+                    base_model,
+                    tokenizer,
+                    current_prompt,
+                    base_model_completion,
+                )
             else:
-                 print('\nSkipping base model attribution (Harmful).')
+                print('\nSkipping base model attribution (Harmful).')
 
-            if tuned_model_completion and tuned_model_completion not in ['[GENERATION ERROR]', '[GENERATION SKIPPED]']:
+            if tuned_model_completion and tuned_model_completion not in [
+                '[GENERATION ERROR]',
+                '[GENERATION SKIPPED]',
+            ]:
                 print(f'Calculating attribution for TUNED model (Harmful)...')
-                tuned_model_attribution = token_attribution(trained_model, tokenizer, current_prompt, tuned_model_completion)
+                tuned_model_attribution = token_attribution(
+                    trained_model,
+                    tokenizer,
+                    current_prompt,
+                    tuned_model_completion,
+                )
             else:
                 print('Skipping tuned model attribution (Harmful).')
 
-
             # --- Visualize Attributions ---
-            print('\n--- Attributions (Harmful) ---') # Indicate harmful
+            print('\n--- Attributions (Harmful) ---')   # Indicate harmful
             if base_model_attribution:
-                valid_scores = [attr for _, attr in base_model_attribution if isinstance(attr, (int, float)) and torch.isfinite(torch.tensor(attr))]
+                valid_scores = [
+                    attr
+                    for _, attr in base_model_attribution
+                    if isinstance(attr, (int, float))
+                    and torch.isfinite(torch.tensor(attr))
+                ]
                 max_base_attr = max(valid_scores) if valid_scores else 1.0
-                print(f'DEBUG: Raw Base Attr Scores (first 10): {base_model_attribution[:10]}')
-                print('Base model: ', visualize_attribution(base_model_attribution, max_attr=max_base_attr), base_model_completion)
+                print(
+                    f'DEBUG: Raw Base Attr Scores (first 10): {base_model_attribution[:10]}'
+                )
+                print(
+                    'Base model: ',
+                    visualize_attribution(
+                        base_model_attribution, max_attr=max_base_attr
+                    ),
+                    base_model_completion,
+                )
             else:
-                 print(f'Base model: [Attribution not calculated] {base_model_completion}')
+                print(
+                    f'Base model: [Attribution not calculated] {base_model_completion}'
+                )
 
             if tuned_model_attribution:
-                valid_scores = [attr for _, attr in tuned_model_attribution if isinstance(attr, (int, float)) and torch.isfinite(torch.tensor(attr))]
+                valid_scores = [
+                    attr
+                    for _, attr in tuned_model_attribution
+                    if isinstance(attr, (int, float))
+                    and torch.isfinite(torch.tensor(attr))
+                ]
                 max_tuned_attr = max(valid_scores) if valid_scores else 1.0
-                print(f'DEBUG: Raw Tuned Attr Scores (first 10): {tuned_model_attribution[:10]}')
-                print('Tuned model:', visualize_attribution(tuned_model_attribution, max_attr=max_tuned_attr), tuned_model_completion)
+                print(
+                    f'DEBUG: Raw Tuned Attr Scores (first 10): {tuned_model_attribution[:10]}'
+                )
+                print(
+                    'Tuned model:',
+                    visualize_attribution(
+                        tuned_model_attribution, max_attr=max_tuned_attr
+                    ),
+                    tuned_model_completion,
+                )
             else:
-                print(f'Tuned model: [Attribution not calculated] {tuned_model_completion}')
+                print(
+                    f'Tuned model: [Attribution not calculated] {tuned_model_completion}'
+                )
 
-            print('-' * 60) # Separator between examples
+            print('-' * 60)   # Separator between examples
     else:
-        print("\nNo harmful examples found or requested to process.")
-
+        print('\nNo harmful examples found or requested to process.')
 
     print('\nProcessing finished.')

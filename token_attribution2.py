@@ -38,7 +38,9 @@ def visualize_attribution(
     if max_attr <= 1e-9:
         # If max_attr is zero or negative, all scores contributing positively are zero or less.
         # In this case, all tokens will likely be green. Use 1.0 to avoid errors.
-        print(f"DEBUG: max_attr ({max_attr:.4f}) is zero or negative, using 1.0 for scaling.")
+        print(
+            f'DEBUG: max_attr ({max_attr:.4f}) is zero or negative, using 1.0 for scaling.'
+        )
         max_attr = 1.0
 
     # --- Define Thresholds for 5 Colors (Green < Cyan < Yellow < Magenta < Red) ---
@@ -401,7 +403,9 @@ if __name__ == '__main__':
     checkpoint = (
         'HuggingFaceTB/SmolLM2-1.7B-Instruct'  # Ensure this model exists
     )
-    trained_model_path = 'large_long_dpo_final_model'   # Ensure path relative to execution
+    trained_model_path = (
+        'large_long_dpo_final_model'  # Ensure path relative to execution
+    )
     dataset_path = './datasets/dataset.json'
     gen_max_length = 100   # Shorter for faster testing potentially
     num_examples_to_show = 3   # Fewer examples for faster testing
