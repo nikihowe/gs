@@ -7,14 +7,19 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    PreTrainedTokenizer,
-)
+from transformers import (AutoModelForCausalLM, AutoTokenizer,
+                          PreTrainedTokenizer)
 
 # Assuming these utils exist and function correctly
 from dataset_utils2 import get_the_datasets
+
+# TODO: add in seeds to make the code determinstic. This is particularly important
+# when restarting from failure, as we want to be sure to shuffle the training dataset
+# in the same way each time.
+# TODO: add WandB logging
+
+## LLM-GENERATED CODE START ##
+
 
 torch.set_default_dtype(torch.float32)
 # torch.autograd.set_detect_anomaly(True) # Enable for debugging NaNs, disable for performance/checkpointing runs
@@ -27,15 +32,16 @@ ACCUMULATION_STEPS = BATCH_SIZE // MINIBATCH_SIZE
 LEARNING_RATE = 1e-6
 BETA = 0.1
 EVAL_STEPS = 100       # Evaluate validation loss every N optimizer steps
-SAVE_INTERVAL = 20    # <<< ADDED: Save checkpoint every N optimizer steps
+SAVE_INTERVAL = 20    # <Save checkpoint every N optimizer steps
 MAX_EVAL_SAMPLES = 300
 MAX_LENGTH = 512       # Define a max sequence length for padding/truncation
 NUM_WORKERS = 4  # Number of workers for DataLoader (adjust based on system)
 LOG_INTERVAL = 10      # Log accumulated train loss every N optimizer steps (adjusted for less noise)
-CHECKPOINT_DIR = (
-    './large_dpo_checkpoints'  # <<< ADDED: Directory to save checkpoints
+CHECKPOINT_DIR = './large_dpo_checkpoints'  # Directory to save checkpoints
+FINAL_MODEL_DIR = (
+    './large_long_dpo_final_model'  # Directory for the final trained model
 )
-FINAL_MODEL_DIR = './large_long_dpo_final_model'   # <<< ADDED: Directory for the final trained model
+TRAIN_DATASET_SIZE = 40000
 
 # --- Setup ---
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -52,9 +58,7 @@ print(f'Checkpoints will be saved in: {CHECKPOINT_DIR}')
 checkpoint = 'HuggingFaceTB/SmolLM2-1.7B-Instruct'
 tokenizer = AutoTokenizer.from_pretrained(checkpoint)
 if tokenizer.pad_token is None:
-    tokenizer.pad_token = (
-        tokenizer.eos_token
-    )  # Common practice if no pad token
+    tokenizer.pad_token = tokenizer.eos_token
     print(
         f'Tokenizer has no pad token, setting it to EOS token: {tokenizer.pad_token}'
     )
@@ -107,14 +111,11 @@ else:
 
 
 # --- Collate Function ---
-# Define global_step before this if used inside for debug prints
-# (It is used in extract_log_probs' debug prints)
 def dpo_collate_fn(
     batch: List[Dict[str, str]],
     tokenizer: PreTrainedTokenizer,
     max_length: int,
 ) -> Dict[str, torch.Tensor]:
-    # ... (collate function remains the same) ...
     if not batch or not all(
         k in batch[0] for k in ['prompt', 'chosen', 'rejected']
     ):
@@ -160,12 +161,10 @@ def dpo_collate_fn(
 
 # --- Dataset Preparation ---
 print('Loading datasets...')
-# Consider using a persistent cache location if /tmp gets cleared often between runs
-# cache_dir = './hf_datasets_cache' # Example persistent cache
 hf_train_dataset_full = get_the_datasets(
     tokenizer,
     max_length=MAX_LENGTH,
-    data_dir='.',  # Use '.' or specific dir for cache
+    data_dir='.',
     processed_cache_base='/tmp',  # Keep processed data fast if desired
 )
 hf_test_dataset = get_the_datasets(
@@ -179,7 +178,7 @@ print('Full datasets loaded.')
 
 
 # --- Subsetting Logic ---
-train_subset_size = 40000   # Or adjust as needed
+train_subset_size = TRAIN_DATASET_SIZE
 if len(hf_train_dataset_full) > train_subset_size:
     hf_train_dataset = hf_train_dataset_full.select(range(train_subset_size))
     print(f'Using a subset of {train_subset_size} training examples.')
@@ -195,7 +194,7 @@ collate_wrapper = partial(
 train_dataloader = DataLoader(
     hf_train_dataset,
     batch_size=MINIBATCH_SIZE,
-    shuffle=True,  # Note: Simple resumption restarts shuffling from the beginning of the epoch
+    shuffle=True,
     collate_fn=collate_wrapper,
     num_workers=NUM_WORKERS,
     pin_memory=True if device == 'cuda' else False,  # Only pin if using GPU
@@ -225,58 +224,33 @@ print(
 
 
 # --- Loss Calculation Functions ---
-# Pass global_step explicitly if needed for debugging, or rely on the global variable
-# Make sure extract_log_probs uses prompt_attention_mask correctly
 def extract_log_probs(
     logits: torch.Tensor,
     labels: torch.Tensor,
-    prompt_mask: torch.Tensor,
     completion_mask: torch.Tensor,
     current_global_step: int,  # Pass step for context in prints
 ) -> torch.Tensor:
-    # ... (rest of extract_log_probs) ...
     shifted_logits = logits[:, :-1, :]
     shifted_labels = labels[:, 1:]
     batch_size, seq_len_shifted, vocab_size = shifted_logits.shape
-
-    # Debug Prints
-    # if current_global_step % 50 == 0 or current_global_step < 5: # Adjusted frequency
-    #     print(f"\n--- Debug LogProb Ranges (Step {current_global_step}) ---")
-    #     if not torch.isnan(shifted_logits).any() and not torch.isinf(shifted_logits).any():
-    #         print(f"shifted_logits: min={shifted_logits.min().item():.4f}, max={shifted_logits.max().item():.4f}")
-    #     else:
-    #         print("!!! shifted_logits contains NaN/Inf !!!")
 
     if torch.isnan(shifted_logits).any() or torch.isinf(shifted_logits).any():
         print(
             f'!!! WARNING: NaN/Inf detected in shifted_logits BEFORE log_softmax at step {current_global_step} !!!'
         )
-        # Consider adding more context here if needed
 
     log_probs_all = F.log_softmax(shifted_logits, dim=-1)
     gathered_log_probs = torch.gather(
         log_probs_all, 2, shifted_labels.unsqueeze(-1)
     ).squeeze(-1)
 
-    completion_mask_orig_shifted = completion_mask[:, 1:]
-    prompt_mask_shifted = prompt_mask[:, :-1]
-    valid_completion_indices_shifted = completion_mask_orig_shifted & (
-        ~prompt_mask_shifted
-    )
+    valid_completion_indices_shifted = completion_mask[:, 1:]
 
     masked_log_probs = gathered_log_probs * valid_completion_indices_shifted
     sum_log_probs_B = masked_log_probs.sum(dim=-1)
     num_completion_tokens_B = valid_completion_indices_shifted.sum(
         dim=-1
     ).float()
-
-    # Debug Prints
-    # if current_global_step % 50 == 0 or current_global_step < 5:
-    #     print(f"num_completion_tokens_B: min={num_completion_tokens_B.min().item():.1f}, max={num_completion_tokens_B.max().item():.1f}")
-    #     if not torch.isnan(sum_log_probs_B).any() and not torch.isinf(sum_log_probs_B).any():
-    #         print(f"sum_log_probs_B: min={sum_log_probs_B.min().item():.4f}, max={sum_log_probs_B.max().item():.4f}")
-    #     else:
-    #         print("!!! sum_log_probs_B contains NaN/Inf !!!")
 
     # Handle division by zero safely
     mean_log_probs_B = torch.where(
@@ -305,8 +279,6 @@ def extract_log_probs(
                 f'  num_completion_tokens: {num_completion_tokens_B[idx].item()}'
             )
             print(f'  sum_log_probs: {sum_log_probs_B[idx].item()}')
-            # Add more debugging if needed, e.g., check inputs that led to this
-        # raise RuntimeError(f"NaN detected in mean log probs at step {current_global_step}") # Optional: Stop execution
 
     assert mean_log_probs_B.shape == (
         batch_size,
@@ -911,3 +883,5 @@ except Exception as e:
     print(f'Error saving final model: {e}')
 
 print('done!')
+
+## LLM-GENERATED CODE END ##
