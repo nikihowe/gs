@@ -1,24 +1,20 @@
-# dataset_utils.py (or dataset_utils2.py)
-
 import os
 
 from transformers import PreTrainedTokenizer
 
 from datasets import Dataset, load_dataset, load_from_disk
 
-# ... (keep extract_prompt_and_response, dpoify_dataset, filter_dpo_dataset_by_response_length functions exactly as they were) ...
-
+# TODO: add better checks that we were able to extract the prompt and response properly
 # Helper function to extract prompt and response from HH format
+# Note that "Assistant: " is used to separate the prompt and response,
+# and is kept as part of the prompt.
 def extract_prompt_and_response(example: str) -> tuple[str, str]:
     """Extracts prompt and response assuming HH format."""
     match_string = '\n\nAssistant: '
     assistant_start_idx = example.rfind(match_string)
     if assistant_start_idx == -1 or assistant_start_idx == 0:
-        # print( # Commented out excessive warning
-        #     f"Warning: Could not find '{match_string}' properly in example: {example[:100]}..."
-        # )
         if assistant_start_idx == -1:
-            return example, ''  # Treat as prompt? Or handle differently?
+            return example, ''  # TODO: Handle this case better
         return (
             match_string,
             example[len(match_string) :],
@@ -40,7 +36,6 @@ def dpoify_dataset(dataset: Dataset) -> Dataset:
             raw_chosen = example.get('chosen')
             raw_rejected = example.get('rejected')
             if not raw_chosen or not raw_rejected:
-                # print("Warning: Missing 'chosen' or 'rejected' key in raw data.")
                 num_errors += 1
                 continue
 
@@ -49,21 +44,14 @@ def dpoify_dataset(dataset: Dataset) -> Dataset:
                 raw_rejected
             )
 
-            # Use stricter check or normalize whitespace if needed
-            if prompt.strip() != prompt2.strip():
-                # print(f"Skipping due to prompt mismatch:\nP1: {prompt[:50]}...\nP2: {prompt2[:50]}...")
+            if prompt != prompt2:
                 num_skipped += 1
                 continue
 
             new_dataset['prompt'].append(prompt)
-            new_dataset['chosen'].append(
-                chosen_response
-            )  # Store only the response part
-            new_dataset['rejected'].append(
-                rejected_response
-            )  # Store only the response part
+            new_dataset['chosen'].append(chosen_response)
+            new_dataset['rejected'].append(rejected_response)
         except Exception as e:
-            # print(f"Error processing example during dpoify: {e}")
             num_errors += 1
             continue
 
@@ -78,6 +66,10 @@ def dpoify_dataset(dataset: Dataset) -> Dataset:
 
 
 # Helper function to filter DPO-formatted dataset by response token length
+# Since most of the datapoints are <512 tokens, we do this to speed
+# things up.
+# TODO: decide if this is actually necessary given our new padding scheme.
+# TODO: simplify this function
 def filter_dpo_dataset_by_response_length(
     dataset: Dataset, tokenizer: PreTrainedTokenizer, max_response_length: int
 ) -> Dataset:
@@ -125,7 +117,6 @@ def filter_dpo_dataset_by_response_length(
         len_chosen = len(chosen_tokens)
         len_rejected = len(rejected_tokens)
 
-        # --- MODIFIED CONDITION ---
         # Ensure length is strictly positive AND respects max_length (if specified)
         is_len_ok = len_chosen > 0 and len_rejected > 0
         if max_response_length > 0:
@@ -133,7 +124,6 @@ def filter_dpo_dataset_by_response_length(
                 len_chosen <= max_response_length
                 and len_rejected <= max_response_length
             )
-        # --- END MODIFICATION ---
 
         return is_len_ok
 
@@ -167,9 +157,7 @@ def filter_dpo_dataset_by_response_length(
     num_removed = initial_count - final_count
     if num_removed > 0:
         print(
-            # --- MODIFIED PRINT STATEMENT ---
             f'Filtered {num_removed}/{initial_count} examples due to response length constraints (length was 0 or > {max_response_length} [if specified])'
-            # --- END MODIFICATION ---
         )
     else:
         print('No examples removed by length filtering.')
@@ -177,15 +165,12 @@ def filter_dpo_dataset_by_response_length(
     return filtered_dataset
 
 
-# --- Main Function ---
 def get_the_datasets(
     tokenizer: PreTrainedTokenizer,  # Tokenizer needed for filtering step
     max_length: int,  # Max length used for filtering logic buffer
     test: bool = False,
     force_reprocess: bool = False,  # Add option to force reprocessing
-    data_dir: str = '.',  # Base directory for *source* data or *persistent* cache (kept for potential future use)
-    # New argument for cache location, defaults to /tmp
-    processed_cache_base: str = '/tmp',  # <--- ADDED ARGUMENT (or hardcode '/tmp')
+    processed_cache_base: str = '/tmp',
 ) -> Dataset:
     """
     Loads/processes HH dataset into DPO format with 'prompt', 'chosen', 'rejected' text columns.
@@ -194,18 +179,16 @@ def get_the_datasets(
     """
     dset_type = 'test' if test else 'train'
 
-    # --- MODIFIED PATH DEFINITION ---
     # Define path for the processed TEXT dataset within the specified cache base
     processed_text_save_path = os.path.join(
         processed_cache_base,
         f'dpo_{dset_type}_text_dataset_ml{max_length}',  # Added max_length to name
     )
     print(f'Using processed dataset cache path: {processed_text_save_path}')
-    # --- END MODIFICATION ---
 
+    # Try to load from disk if possible
     if not force_reprocess:
         try:
-            # The logic remains the same, just the path variable is different
             if os.path.exists(processed_text_save_path):
                 dpo_text_dataset = load_from_disk(processed_text_save_path)
                 print(
@@ -237,12 +220,8 @@ def get_the_datasets(
     print('Processing original dataset...')
     # --- Load Raw Data ---
     try:
-        # Specify cache_dir for huggingface datasets download if desired (separate from processed cache)
-        # hf_cache_dir = os.path.join(data_dir, 'hf_cache')
-        # os.makedirs(hf_cache_dir, exist_ok=True)
         dataset = load_dataset(
             'Unified-Language-Model-Alignment/Anthropic_HH_Golden',
-            # cache_dir=hf_cache_dir # Optional: Control where HF downloads/caches raw data
         )
         raw_dset = dataset[dset_type]
         print(f'Original {dset_type} dataset has {len(raw_dset)} examples')
@@ -260,7 +239,11 @@ def get_the_datasets(
         return dpo_text_dataset   # Return empty
 
     # --- Filtering based on DPO format (Now Active) ---
-    prompt_buffer = 10   # Consider making this dynamic or an argument
+    # We want the prompt and the response to be below the max length,
+    # So adding a buffer here to make sure that when we put them 
+    # together, nothing weird happens. It should not be necessary.
+    # TODO: check if this is necessary.
+    prompt_buffer = 10
     filter_max_response_len = max_length - prompt_buffer
     print(
         f'Calculated max response length for filtering: {filter_max_response_len} (max_length={max_length}, buffer={prompt_buffer})'
@@ -304,11 +287,8 @@ def get_the_datasets(
             print(
                 f'Error saving processed dataset to {processed_text_save_path}: {e}'
             )
-            # Decide if you want to raise the error or just continue without saving
-            # raise e # Uncomment if saving failure should stop the process
+            raise e
     elif not force_reprocess and os.path.exists(processed_text_save_path):
-        # If we ended up with an empty dataset after processing, but a cached one exists
-        # (and we didn't force reprocess), maybe remove the invalid cache? Optional.
         try:
             print(
                 f'Attempting to remove potentially invalid empty cache: {processed_text_save_path}'
