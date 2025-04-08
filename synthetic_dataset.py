@@ -5,13 +5,13 @@ import json
 REPLACE_TOKEN = '<|REPLACE|>'
 SAMPLING_PARAMS = SamplingParams(
     seed=0,
-    n=20,
+    n=2000,  # How many good and bad samples to generate
     max_tokens=50,
 )
 
 
 # For generative models (task=generate) only
-# NOTE: this code was copied from the vllm documentation (modulo olmo)
+# NOTE: some this code was copied from the vllm documentation and modified
 llm = LLM(model='allenai/OLMo-2-1124-13B-Instruct', task='generate')
 
 with open('./prompt.txt', 'r') as fp:
