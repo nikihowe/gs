@@ -294,10 +294,7 @@ def dpo_loss_function(
     beta: float,
     current_global_step: int,  # Pass step for context
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    # ... (rest of dpo_loss_function) ...
-    pi_logratios = policy_chosen_logprobs - policy_rejected_logprobs
-    ref_logratios = ref_chosen_logprobs - ref_rejected_logprobs
-
+    
     # Check for NaNs in inputs early
     if any(
         torch.isnan(t).any()
@@ -311,22 +308,10 @@ def dpo_loss_function(
         print(
             f'!!! WARNING: NaN detected in logprob inputs to DPO loss at step {current_global_step} !!!'
         )
-        # Add more specific checks if needed
 
+    pi_logratios = policy_chosen_logprobs - policy_rejected_logprobs
+    ref_logratios = ref_chosen_logprobs - ref_rejected_logprobs
     logits = pi_logratios - ref_logratios
-    # logits.requires_grad_(True) # Not usually necessary here, handled by inputs
-
-    # Debug Prints
-    # if torch.isnan(logits).any() or torch.isinf(logits).any() or current_global_step % 50 == 0:
-    #     print(f"\n--- Debug DPO Loss Inputs (Step {current_global_step}) ---")
-    #     # Print stats safely, handling potential NaNs/Infs
-    #     for name, tensor in [('Policy Chosen', policy_chosen_logprobs), ('Policy Rejected', policy_rejected_logprobs),
-    #                          ('Ref Chosen', ref_chosen_logprobs), ('Ref Rejected', ref_rejected_logprobs),
-    #                          ('Logits', logits)]:
-    #         if not torch.isnan(tensor).any() and not torch.isinf(tensor).any():
-    #              print(f"{name} Logprobs/Logits: min={tensor.min().item():.4f}, max={tensor.max().item():.4f}, mean={tensor.mean().item():.4f}")
-    #         else:
-    #              print(f"{name} Logprobs/Logits: CONTAINS NaN/Inf !!!")
 
     loss = -F.logsigmoid(beta * logits).mean()
 
@@ -335,7 +320,6 @@ def dpo_loss_function(
         print(
             f'!!! WARNING: DPO loss is NaN at step {current_global_step} !!!'
         )
-        # raise RuntimeError(f"NaN loss encountered at step {current_global_step}") # Optional: Stop
 
     chosen_rewards = (
         beta * (policy_chosen_logprobs - ref_chosen_logprobs).detach()
@@ -354,8 +338,6 @@ def get_batch_loss(
     beta: float,
     current_global_step: int,  # Pass step for context
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    # ... (rest of get_batch_loss, making sure to pass current_global_step to sub-functions) ...
-
     # --- 1. Concatenate prompt and completions ---
     concat_chosen_ids = torch.cat(
         [batch['prompt_input_ids'], batch['chosen_input_ids']], dim=-1
@@ -496,16 +478,6 @@ def get_batch_loss(
 
 # --- DPO Training Loop ---
 model.train()
-optimizer.zero_grad()  # Zero gradients initially (might be redundant if loaded checkpoint already had zeroed grads, but safe)
-
-print(
-    f'Starting training from Epoch {start_epoch}, Global Step {global_step}...'
-)
-# Use range starting from start_epoch
-for epoch in range(start_epoch, EPOCHS):
-    print(f'--- Epoch {epoch+1}/{EPOCHS} ---')   # Display 1-based epoch
-    # --- DPO Training Loop ---
-model.train()
 optimizer.zero_grad()   # Zero gradients initially
 
 print(
@@ -537,7 +509,6 @@ for epoch in range(start_epoch, EPOCHS):
         )
         continue
 
-    # --- <<< ADDED: Batch Skipping Logic >>> ---
     microbatches_to_skip = 0
     if epoch == start_epoch and global_step > 0:
         # Calculate how many optimizer steps were completed *in this specific epoch*
@@ -589,7 +560,6 @@ for epoch in range(start_epoch, EPOCHS):
                 remaining_microbatches = 0   # No batches left to process
                 break
         print('Finished skipping.')
-    # --- <<< END Batch Skipping Logic >>> ---
 
     # Setup progress bar for the *entire* epoch, starting from the skipped count
     progress_bar = tqdm(
@@ -741,6 +711,7 @@ for epoch in range(start_epoch, EPOCHS):
                     val_dataloader,
                     desc=f'Validation (subset ~{MAX_EVAL_SAMPLES})',
                     leave=False,  # Make the bar disappear after completion
+                    mininterval=5.0,
                 )
                 with torch.no_grad():  # Ensure no gradients are computed during validation
                     for val_batch in val_progress_bar:
@@ -757,9 +728,6 @@ for epoch in range(start_epoch, EPOCHS):
                         ].size(0)
 
                         # Get loss and rewards for the validation batch
-                        # *** Ensure get_batch_loss returns exactly these 3 values ***
-                        # *** based on its current definition. If you reverted dpo_loss_function, ***
-                        # *** get_batch_loss should only return 3 things. ***
                         (
                             eval_loss,
                             eval_chosen_rewards,
@@ -818,10 +786,8 @@ for epoch in range(start_epoch, EPOCHS):
                     )
 
                 model.train()  # Set back to training mode before continuing training loop
-            # === END OF VALIDATION BLOCK ===
 
             # --- Checkpoint Saving ---
-            # Ensure you have the version that saves 'epoch': epoch
             if global_step > 0 and global_step % SAVE_INTERVAL == 0:
                 step_checkpoint_path = os.path.join(
                     CHECKPOINT_DIR, f'step_{global_step}.pth'
@@ -860,15 +826,7 @@ for epoch in range(start_epoch, EPOCHS):
     # (Optional end-of-epoch checkpoint save logic could go here)
 
 # --- End of Epoch Loop ---
-
-# (The final 'Training finished.' print and final save logic follow here)
-
-
-# --- Final Check & Save ---
 print('Training finished.')
-
-# Optional: Final verification of ref model (already present)
-# ... (verification code) ...
 
 # Save the final trained model to a separate directory
 print(f'Saving final model to {FINAL_MODEL_DIR}...')
