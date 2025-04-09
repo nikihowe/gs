@@ -1,37 +1,153 @@
 import json
+import math  # For isnan/isfinite checks if needed
 import os
 
 import torch
 import torch.nn.functional as F
 from colorama import Fore, Style
+from colorama import init as colorama_init
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+# Initialize colorama
+colorama_init(autoreset=True)
+
+# --- Global DEBUG Flag ---
+# Set to True to enable detailed debugging print statements
+# Set to False to hide debugging print statements
+DEBUG = False   # <<< Set this to False to turn off debug prints
+
+# Define device
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-print(f'Using device: {device}')
+print(f'Using device: {device}')   # User info, keep visible
+
+# ==============================================================================
+# Visualization Helper (5-Color Scale)
+# ==============================================================================
 
 
-def token_attribution(
+def visualize_attribution(
+    tokens_with_attributions: list[tuple[str, float]],
+    max_attr: float,  # Max score used for normalization (e.g., max positive drop)
+    method: str = "loo",
+) -> str:
+    """
+    Visualizes attribution scores using a 5-color scale.
+    Assumes higher positive score means more importance.
+
+    Args:
+        tokens_with_attributions: List of (token_string, score) tuples.
+        max_attr: The maximum *positive* score for normalization.
+
+    Returns:
+        A string with tokens colored based on their normalized scores.
+    """
+    colored_text = ''
+    # Use a small epsilon to avoid division by zero and handle zero max_attr
+    if max_attr <= 1e-9:
+        # If max_attr is zero or negative, all scores contributing positively are zero or less.
+        # In this case, all tokens will likely be green. Use 1.0 to avoid errors.
+        if DEBUG:
+            print(
+                f'DEBUG: max_attr ({max_attr:.4f}) is zero or negative, using 1.0 for scaling.'
+            )
+        max_attr = 1.0
+
+    # --- Define Thresholds for 5 Colors (Green < Cyan < Yellow < Magenta < Red) ---
+    # !!! IMPORTANT: TUNE THESE THRESHOLDS BASED ON YOUR OBSERVED LOO SCORE RANGE !!!
+    # LOO scores (log prob drop) might be small values. Check DEBUG output.
+    # Example thresholds assuming max_attr corresponds to a significant drop:
+    if method == "loo":
+        threshold_cyan = 0.05   # Score > 5% of max drop
+        threshold_yellow = 0.15   # Score > 15% of max drop
+        threshold_magenta = 0.30   # Score > 30% of max drop
+        threshold_red = 0.60   # Score > 60% of max drop
+    else:
+        threshold_cyan = 0.005  # Scores > 0.005 (0.5% of max) up to 0.010 are Cyan
+        threshold_yellow = (
+            0.010  # Scores > 0.010 (1.0% of max) up to 0.015 are Yellow
+        )
+        threshold_magenta = (
+            0.015  # Scores > 0.015 (1.5% of max) up to 0.500 are Magenta
+        )
+        threshold_red = (
+            0.500  # Scores > 0.500 (50% of max) are Red (Should catch 'Human')
+        )
+    # --- Scores <= threshold_cyan will be Green ---
+
+    if DEBUG:
+        print(
+            f'DEBUG: Visualizing with max_attr={max_attr:.4f}, Thresh: G<={threshold_cyan:.4f}<C<={threshold_yellow:.4f}<Y<={threshold_magenta:.4f}<M<={threshold_red:.4f}<R'
+        )
+
+    for token, score in tokens_with_attributions:
+        # Ensure score is valid float, default to 0 otherwise
+        if not isinstance(score, (float, int)) or not math.isfinite(score):
+            score = 0.0
+
+        # Normalize score: Use max(0, score) to focus on positive importance (probability drop)
+        # Scale relative to max_attr. Clamp between 0 and 1.
+        norm_attribution = min(1.0, max(0.0, score) / max_attr)
+
+        # Determine color based on thresholds
+        if norm_attribution > threshold_red:
+            color = Fore.RED      # Highest importance
+        elif norm_attribution > threshold_magenta:
+            color = Fore.MAGENTA  # High-Medium importance
+        elif norm_attribution > threshold_yellow:
+            color = Fore.YELLOW   # Medium importance
+        elif norm_attribution > threshold_cyan:
+            color = Fore.CYAN     # Low-Medium importance
+        else:
+            color = Fore.GREEN    # Lowest importance (or negative score)
+
+        # Handle token display string (handling spaces, bytes)
+        display_token = token
+        if isinstance(token, str) and token.startswith('Ġ'):
+            display_token = ' ' + token[1:]
+        elif isinstance(token, bytes):
+            display_token = token.decode('utf-8', errors='replace')
+
+        colored_text += f'{color}{display_token}{Style.RESET_ALL}'
+    return colored_text
+
+
+# ==============================================================================
+# Leave-One-Out (LOO) Token Attribution Function
+# ==============================================================================
+
+
+def token_attribution_loo(  # Renamed from original code
     model: AutoModelForCausalLM,
     tokenizer: AutoTokenizer,
     prompt: str,
     completion: str,
 ) -> list[tuple[str, float]]:
+    """
+    Calculates token attribution scores using Leave-One-Out (LOO) method.
+    Scores represent the drop in average log probability of the completion
+    when a prompt token is masked. Higher score = more important token.
+    """
     model.eval()
+    if DEBUG:
+        print('\n--- DEBUG: Inside token_attribution_loo ---')
 
-    # --- 1. Tokenization and Index Identification ---
+    # --- Tokenization using combined text and offset mapping ---
     full_text = prompt + completion
-    # --- FIX: Use rstrip() for boundary calculation ---
     prompt_content_len = len(
         prompt.rstrip()
-    )   # Length excluding trailing whitespace
+    )   # Use stripped length for boundary
 
-    print(f'\n--- DEBUG: Inside token_attribution ---')
-    print(f"DEBUG: Prompt (first 80 chars): '{prompt[:80]}...'")
-    print(f"DEBUG: Completion: '{completion}'")
-    print(f'DEBUG: Original Prompt Char Length: {len(prompt)}')
-    print(
-        f'DEBUG: Stripped Prompt Boundary Length (for check): {prompt_content_len}'
-    )
+    # Check for empty prompt or completion early
+    if not prompt.strip():
+        print(
+            'Error: Prompt is empty or only whitespace.'
+        )   # Keep Error visible
+        return []
+    if not completion.strip():
+        print(
+            'Error: Completion is empty or only whitespace.'
+        )   # Keep Error visible
+        return []
 
     try:
         inputs = tokenizer(
@@ -42,295 +158,300 @@ def token_attribution(
             return_offsets_mapping=True,
         ).to(device)
     except Exception as e:
-        print(f'Error during tokenization: {e}')
+        print(f'Error during tokenization: {e}')   # Keep Error visible
         return []
 
-    input_ids = inputs['input_ids'][0]
-    offsets = inputs['offset_mapping'][0].tolist()
-    sequence_length = len(input_ids)
+    input_ids = inputs['input_ids']   # Shape: (1, sequence_length)
+    # Check if tokenization resulted in empty input_ids (e.g., due to truncation)
+    if input_ids.shape[1] == 0:
+        print(
+            'Error: Tokenization resulted in empty input_ids.'
+        )   # Keep Error visible
+        return []
 
-    print(f'DEBUG: Sequence Length (tokens): {sequence_length}')
-    # (Optional: Keep offset debug prints if needed)
-    # print(f"DEBUG: Offsets (first 10): {offsets[:10]}")
-    # print(f"DEBUG: Offsets (last 10): {offsets[-10:]}")
+    attention_mask = inputs['attention_mask']
+    # Handle case where offset_mapping might not be returned by tokenizer if truncation happened strangely
+    offsets = inputs.get('offset_mapping')
+    if offsets is None:
+        print(
+            'Error: Tokenizer did not return offset_mapping. Cannot proceed with robust indexing.'
+        )   # Keep Error visible
+        return []
+    offsets = offsets[0].tolist()
+    sequence_length = input_ids.shape[1]
 
-    prompt_start_idx = 0
+    # --- Determine Prompt/Completion Indices ---
+    prompt_start_idx = 0   # Index of first content token in prompt
     if (
         getattr(tokenizer, 'add_bos_token', False)
-        and input_ids[0] == tokenizer.bos_token_id
+        and input_ids[0, 0] == tokenizer.bos_token_id
     ):
         prompt_start_idx = 1
-        # (Optional: Keep BOS debug print)
-        # print(f"DEBUG: BOS token detected, prompt_start_idx = 1")
 
     completion_token_start_index = -1
     for idx, (start_char, end_char) in enumerate(offsets):
+        # Basic skip for special tokens represented by (0,0)
         if start_char == 0 and end_char == 0:
             if idx == 0 and prompt_start_idx == 1:
+                continue   # Allow BOS
+            # Add check for PAD token if necessary
+            if input_ids[0, idx] == tokenizer.pad_token_id:
                 continue
+            # May need more robust special token handling depending on tokenizer
             else:
                 continue
-
-        # --- FIX: Compare against stripped length ---
+        # Find first token starting at or after the stripped prompt content ends
         if start_char >= prompt_content_len:
             completion_token_start_index = idx
-            print(
-                f'DEBUG: Found completion start at index {idx} using boundary {prompt_content_len}, offset ({start_char}, {end_char})'
-            )
             break
-
     if completion_token_start_index == -1:
-        completion_token_start_index = sequence_length
-        print(
-            f'DEBUG: Completion start not found via offset, setting to end: {sequence_length}'
-        )
+        completion_token_start_index = sequence_length   # Assume completion is empty if boundary not found
 
-    prompt_end_idx = completion_token_start_index
-    print(
-        f'DEBUG: Final prompt indices range: [{prompt_start_idx}:{prompt_end_idx}]'
+    prompt_end_idx = completion_token_start_index   # Prompt ends before first completion token
+
+    # Indices relative to the sequence start (ensure they are within bounds)
+    prompt_content_indices = list(
+        range(prompt_start_idx, min(prompt_end_idx, sequence_length))
     )
-    print(
-        f'DEBUG: Final completion indices range: [{completion_token_start_index}:{sequence_length}]'
+    completion_indices = list(
+        range(
+            min(completion_token_start_index, sequence_length), sequence_length
+        )
     )
 
-    prompt_indices = range(prompt_start_idx, prompt_end_idx)
-    completion_indices = range(completion_token_start_index, sequence_length)
-
-    # --- Decode for Debugging (Keep this block) ---
-    if sequence_length > 0:
-        actual_prompt_token_ids = input_ids[prompt_indices]
-        actual_prompt_tokens_decoded = tokenizer.convert_ids_to_tokens(
-            actual_prompt_token_ids
-        )
+    # Ensure prompt/completion indices are valid and non-empty
+    if not prompt_content_indices:
         print(
-            f'DEBUG: Tokens assigned to PROMPT: {actual_prompt_tokens_decoded}'
-        )
-
-        if completion_indices:
-            actual_completion_token_ids = input_ids[completion_indices]
-            actual_completion_tokens_decoded = tokenizer.convert_ids_to_tokens(
-                actual_completion_token_ids
-            )
-            print(
-                f'DEBUG: Tokens assigned to COMPLETION: {actual_completion_tokens_decoded}'
-            )
-        else:
-            print('DEBUG: Tokens assigned to COMPLETION: [] (Empty Range)')
-    else:
-        print('DEBUG: Sequence length is 0, cannot decode tokens.')
-
-    # --- Sanity Checks (Keep these, but ensure prompt_tokens list is defined if needed) ---
-    if not (
-        0
-        <= prompt_start_idx
-        <= prompt_end_idx
-        <= completion_token_start_index
-        <= sequence_length
-    ):
-        print(f'Error: Invalid index calculation. Skipping.')
-        print(f'--- END DEBUG (Error): Exiting token_attribution ---\n')
+            'Error: No prompt content tokens found after index calculation.'
+        )   # Keep Error visible
         return []
-    # Check if prompt range is valid *before* trying to decode (actual_prompt_tokens_decoded handles empty case now)
-    if prompt_start_idx >= prompt_end_idx:
-        print('Warning: Prompt has zero tokens.')
-        print(f'--- END DEBUG (Warning): Exiting token_attribution ---\n')
-        return []
+    # Need at least one completion token to calculate probability
     if not completion_indices:
         print(
-            'Warning: Completion has zero tokens. Returning zero attribution.'
-        )
-        prompt_tokens = (
-            actual_prompt_tokens_decoded
-            if 'actual_prompt_tokens_decoded' in locals()
-            else []
-        )
-        if not prompt_tokens:
-            return []
-        print(f'--- END DEBUG (Warning): Exiting token_attribution ---\n')
-        return [(token, 0.0) for token in prompt_tokens]
+            'Error: No completion tokens found after index calculation.'
+        )   # Keep Error visible
+        return []
 
-    # --- 2. Forward Pass, Attention Aggregation, Score Calculation ---
-    attribution_scores_list = []   # Initialize return list
+    # Get prompt token strings ONCE using convert_ids_to_tokens
+    prompt_token_ids = input_ids[0, prompt_content_indices]
+    prompt_token_strings = tokenizer.convert_ids_to_tokens(prompt_token_ids)
+    if DEBUG:
+        print(
+            f'DEBUG: Prompt content tokens ({len(prompt_token_strings)}): {prompt_token_strings}'
+        )
+
+    completion_token_ids = input_ids[
+        0, completion_indices
+    ]   # Needed for manual calculation if used
+    if DEBUG:
+        print(
+            f'DEBUG: Completion tokens ({len(completion_indices)}): {tokenizer.convert_ids_to_tokens(completion_token_ids)}'
+        )
+
+    # --- Calculate Baseline Log Probability ---
+    baseline_log_prob = 0.0
     try:
         with torch.no_grad():
-            outputs = model(**inputs, output_attentions=True)
-            attentions = outputs.attentions
+            outputs = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                return_dict=True,
+            )
+            logits = outputs.logits   # Shape: (1, sequence_length, vocab_size)
 
-        if attentions is None:
-            print('Error: Model did not return attention scores.')
-            print(f'--- END DEBUG (Error): Exiting token_attribution ---\n')
-            return []
-
-        # --- 3. Attention Aggregation ---
-        last_layer_attention = attentions[-1].to(device)
-        avg_head_attention = last_layer_attention.mean(dim=1).squeeze(0)
-
-        # --- 4. Calculate Attribution Scores ---
-        # (Keep the inner try-except for indexing errors here)
-        try:
-            attribution_matrix = avg_head_attention[completion_indices, :][
-                :, prompt_indices
+            # Shift logits and labels for next token prediction loss calculation
+            # Logits predicting the completion tokens start one position earlier in the sequence
+            shift_logits = logits[
+                :, completion_token_start_index - 1 : sequence_length - 1, :
             ]
-            prompt_token_scores = attribution_matrix.sum(
-                dim=0
-            )   # Assign scores here
-        except IndexError as e:
-            print(f'Error indexing attention matrix: {e}')
-            print(f'--- END DEBUG (Error): Exiting token_attribution ---\n')
-            return []
-        except Exception as e:
-            print(f'Error during attribution calculation: {e}')
-            print(f'--- END DEBUG (Error): Exiting token_attribution ---\n')
-            return []
+            # Labels are the actual completion token IDs
+            shift_labels = input_ids[
+                :, completion_token_start_index:sequence_length
+            ]
 
-        # --- 5. Format Output [INSIDE TRY BLOCK] ---
-        prompt_token_ids_final = input_ids[prompt_indices]
-        prompt_tokens_final = tokenizer.convert_ids_to_tokens(
-            prompt_token_ids_final
-        )
-        print(
-            f'DEBUG: Final prompt tokens list being returned: {prompt_tokens_final}'
-        )
+            # Ensure shapes match for loss calculation
+            if shift_logits.shape[1] == 0 or shift_labels.shape[1] == 0:
+                print(
+                    'Error: Cannot calculate baseline loss due to zero-length logits or labels after slicing.'
+                )   # Keep Error visible
+                if DEBUG:
+                    print(
+                        f'DEBUG: Shift logits shape: {shift_logits.shape}, Shift labels shape: {shift_labels.shape}'
+                    )
+                return []
+            if shift_logits.shape[1] != shift_labels.shape[1]:
+                print(
+                    'Error: Mismatch between shifted logits and labels lengths.'
+                )   # Keep Error visible
+                if DEBUG:
+                    print(
+                        f'DEBUG: Shift logits shape: {shift_logits.shape}, Shift labels shape: {shift_labels.shape}'
+                    )
+                # Adjust length if off by one (common issue)
+                min_len = min(shift_logits.shape[1], shift_labels.shape[1])
+                shift_logits = shift_logits[:, :min_len, :]
+                shift_labels = shift_labels[:, :min_len]
+                if DEBUG:
+                    print(
+                        f'DEBUG: Adjusted shapes to: {shift_logits.shape}, {shift_labels.shape}'
+                    )
 
-        # --- FIX: NameError resolved as prompt_token_scores is now defined ---
-        if len(prompt_tokens_final) != len(prompt_token_scores):
-            print(
-                f'Error: Mismatch final token count ({len(prompt_tokens_final)}) vs score count ({len(prompt_token_scores)}).'
+            # Use cross_entropy loss (average negative log likelihood)
+            loss_fct = torch.nn.CrossEntropyLoss(reduction='mean')
+            neg_log_likelihood = loss_fct(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
             )
-            min_len = min(len(prompt_tokens_final), len(prompt_token_scores))
-            attribution_scores_list = list(
-                zip(
-                    prompt_tokens_final[:min_len],
-                    prompt_token_scores.cpu().tolist()[:min_len],
+            baseline_log_prob = (
+                -neg_log_likelihood.item()
+            )   # Average log probability
+
+        if DEBUG:
+            print(f'DEBUG: Baseline Avg Log Prob: {baseline_log_prob:.4f}')
+
+    except Exception as e:
+        print(
+            f'Error calculating baseline probability: {e}'
+        )   # Keep Error visible
+        if DEBUG:   # Optionally show traceback only in debug mode
+            import traceback
+
+            traceback.print_exc()
+        return []
+
+    # --- Loop through prompt tokens to mask ---
+    attribution_scores = []
+    pad_token_id = tokenizer.pad_token_id
+    if pad_token_id is None:
+        print(
+            'Error: tokenizer.pad_token_id is None. Cannot mask tokens.'
+        )   # Keep Error visible
+        return []
+
+    # Iterate using the indices relative to the start of the sequence
+    for i, token_index_in_sequence in enumerate(prompt_content_indices):
+        token_str = prompt_token_strings[i]   # Get the correct string
+        # Skip masking pad tokens if they somehow ended up in prompt_content_indices
+        if input_ids[0, token_index_in_sequence] == pad_token_id:
+            if DEBUG:
+                print(
+                    f'DEBUG: Skipping masking of PAD token at index {token_index_in_sequence}'
                 )
+            attribution_scores.append(
+                (token_str, 0.0)
+            )   # Assign zero score to PAD
+            continue
+
+        if DEBUG:
+            print(
+                f"\nDEBUG: Masking token {i}: '{token_str}' (Index in sequence: {token_index_in_sequence})"
             )
-        else:
-            attribution_scores_list = list(
-                zip(prompt_tokens_final, prompt_token_scores.cpu().tolist())
-            )
 
-    except Exception as e:   # Catch errors from forward pass itself or others in the block
-        print(f'Error during model forward pass or subsequent processing: {e}')
-        print(f'--- END DEBUG (Error): Exiting token_attribution ---\n')
-        return (
-            []
-        )   # Return empty list if anything in the main try block failed
+        # Create masked inputs
+        masked_input_ids = input_ids.clone()
+        masked_attention_mask = attention_mask.clone()
+        masked_input_ids[0, token_index_in_sequence] = pad_token_id
+        masked_attention_mask[
+            0, token_index_in_sequence
+        ] = 0   # Mask attention
 
-    print(f'--- END DEBUG: Exiting token_attribution ---\n')
-    return attribution_scores_list
+        # --- Calculate Masked Log Probability ---
+        masked_log_prob = 0.0
+        try:
+            with torch.no_grad():
+                outputs = model(
+                    input_ids=masked_input_ids,
+                    attention_mask=masked_attention_mask,
+                    return_dict=True,
+                )
+                logits = outputs.logits
 
+                # Calculate loss only for completion part, same way as baseline
+                shift_logits = logits[
+                    :,
+                    completion_token_start_index - 1 : sequence_length - 1,
+                    :,
+                ]
+                # Use original labels for comparison!
+                shift_labels = input_ids[
+                    :, completion_token_start_index:sequence_length
+                ]
 
-# --- Rest of your code (visualize_attribution, __main__) below ---
+                # Ensure shapes match (repeat check for safety)
+                if shift_logits.shape[1] == 0 or shift_labels.shape[1] == 0:
+                    print(
+                        f'Error: Cannot calculate masked loss for token {i} ({token_str}) due to zero-length logits/labels.'
+                    )   # Keep Error visible
+                    masked_log_prob = -float(
+                        'inf'
+                    )   # Indicate error with very low log prob
+                elif shift_logits.shape[1] != shift_labels.shape[1]:
+                    print(
+                        f'Error: Mismatch masked logits/labels for token {i} ({token_str}). Adjusting.'
+                    )   # Keep Error visible
+                    min_len = min(shift_logits.shape[1], shift_labels.shape[1])
+                    shift_logits = shift_logits[:, :min_len, :]
+                    shift_labels = shift_labels[:, :min_len]
+                    loss_fct = torch.nn.CrossEntropyLoss(reduction='mean')
+                    neg_log_likelihood = loss_fct(
+                        shift_logits.view(-1, shift_logits.size(-1)),
+                        shift_labels.view(-1),
+                    )
+                    masked_log_prob = -neg_log_likelihood.item()
+                else:
+                    loss_fct = torch.nn.CrossEntropyLoss(reduction='mean')
+                    neg_log_likelihood = loss_fct(
+                        shift_logits.view(-1, shift_logits.size(-1)),
+                        shift_labels.view(-1),
+                    )
+                    masked_log_prob = -neg_log_likelihood.item()
 
+            if DEBUG:
+                print(f'DEBUG: Masked Avg Log Prob: {masked_log_prob:.4f}')
 
-# --------------------------------------------------------------------------
-# The rest of your code (visualize_attribution, create_attribution_display,
-# and the __main__ block) should remain the same.
-# Make sure the __main__ block calls this updated token_attribution function.
-# --------------------------------------------------------------------------
+            # --- Calculate Score ---
+            # Score = Drop in log prob (baseline - masked)
+            # Higher score means original token was more important (removing it lowered the prob)
+            # Handle potential -inf from error case
+            if masked_log_prob == -float('inf'):
+                score = -float('inf')   # Propagate error indication
+                if DEBUG:
+                    print(f'DEBUG: Score (Drop): Error Propagated')
+            else:
+                score = baseline_log_prob - masked_log_prob
+                if DEBUG:
+                    print(f'DEBUG: Score (Drop): {score:.4f}')
 
-import torch  # Ensure torch is imported if used for isfinite check
-from colorama import Fore, Style
-from colorama import init as colorama_init
+            attribution_scores.append((token_str, score))
 
-# Initialize colorama if not done globally
-# colorama_init(autoreset=True)
+        except Exception as e:
+            print(
+                f"Error calculating masked probability for token {i} ('{token_str}'): {e}"
+            )   # Keep Error visible
+            if DEBUG:   # Optionally show traceback only in debug mode
+                import traceback
 
+                traceback.print_exc()
+            attribution_scores.append(
+                (token_str, 0.0)
+            )   # Append zero score on error
 
-def visualize_attribution(
-    tokens_with_attributions: list[tuple[str, float]],
-    max_attr: float,
-) -> str:
-    """
-    Visualizes attribution scores using a 5-color scale.
-
-    Args:
-        tokens_with_attributions: List of (token_string, score) tuples.
-        max_attr: The maximum attribution score for normalization.
-
-    Returns:
-        A string with tokens colored based on their normalized scores.
-    """
-    colored_text = ''
-    # Use a small epsilon to avoid division by zero and handle very small max_attr
-    if max_attr <= 1e-9:
+    if DEBUG:
         print(
-            f'DEBUG: max_attr ({max_attr:.4f}) is very small or non-positive, using 1.0 for scaling.'
+            f'\nDEBUG: Final LOO attribution_scores (first 10): {attribution_scores[:10]}'
         )
-        max_attr = 1.0
-
-    # --- Define Thresholds for 5 Colors (Green < Cyan < Yellow < Magenta < Red) ---
-    # IMPORTANT: Adjust these thresholds based on your raw score distribution!
-    # These examples are tuned low based on previous debug output (max~50, others <1.0).
-    threshold_cyan = 0.005  # Scores > 0.005 (0.5% of max) up to 0.010 are Cyan
-    threshold_yellow = (
-        0.010  # Scores > 0.010 (1.0% of max) up to 0.015 are Yellow
-    )
-    threshold_magenta = (
-        0.015  # Scores > 0.015 (1.5% of max) up to 0.500 are Magenta
-    )
-    threshold_red = (
-        0.500  # Scores > 0.500 (50% of max) are Red (Should catch 'Human')
-    )
-    # Scores <= 0.005 are Green
-
-    # --- Alternatively, use evenly spaced thresholds if scores are distributed differently ---
-    # threshold_cyan = 0.20
-    # threshold_yellow = 0.40
-    # threshold_magenta = 0.60
-    # threshold_red = 0.80
-    # ---
-
-    # Debug print to show thresholds being used
-    print(
-        f'DEBUG: Visualizing with max_attr={max_attr:.4f}, Thresh: G<={threshold_cyan:.4f}<C<={threshold_yellow:.4f}<Y<={threshold_magenta:.4f}<M<={threshold_red:.4f}<R'
-    )
-
-    for token, attribution in tokens_with_attributions:
-        # Ensure score is valid before processing
-        if not isinstance(attribution, (float, int)) or not torch.isfinite(
-            torch.tensor(attribution)
-        ):
-            attribution = (
-                0.0  # Default to 0 for NaN, infinity, or non-numeric types
-            )
-
-        # Normalize score relative to max_attr (clamped between 0 and 1)
-        norm_attribution = max(0.0, attribution) / max_attr
-        norm_attribution = min(
-            norm_attribution, 1.0
-        )   # Clamp top end just in case
-
-        # Determine color using the defined thresholds
-        if norm_attribution > threshold_red:
-            color = Fore.RED      # Highest importance
-        elif norm_attribution > threshold_magenta:
-            color = Fore.MAGENTA  # High-Medium importance
-        elif norm_attribution > threshold_yellow:
-            color = Fore.YELLOW   # Medium importance
-        elif norm_attribution > threshold_cyan:
-            color = Fore.CYAN     # Low-Medium importance
-        else:
-            color = Fore.GREEN    # Lowest importance
-
-        # Handle token display string (handling spaces, bytes)
-        display_token = token
-        if isinstance(token, str) and token.startswith('Ġ'):
-            display_token = ' ' + token[1:]
-        elif isinstance(token, bytes):
-            display_token = token.decode('utf-8', errors='replace')
-
-        # Append colored token to the result string
-        colored_text += f'{color}{display_token}{Style.RESET_ALL}'
-
-    return colored_text
+        print('--- END DEBUG: Exiting token_attribution_loo ---')
+    return attribution_scores
 
 
 # ==============================================================================
-# Main Execution Block (Modified)
+# Main Execution Block (Using LOO Attribution)
 # ==============================================================================
 if __name__ == '__main__':
     colorama_init(autoreset=True)   # Initialize colorama
+
+    token_attribution = token_attribution_loo
+    method = "loo"
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f'Using device: {device}')
@@ -595,7 +716,7 @@ if __name__ == '__main__':
                 print(
                     'Base model: ',
                     visualize_attribution(
-                        base_model_attribution, max_attr=max_base_attr
+                        base_model_attribution, max_attr=max_base_attr, method=method,
                     ),
                     base_model_completion,
                 )
@@ -618,7 +739,7 @@ if __name__ == '__main__':
                 print(
                     'Tuned model:',
                     visualize_attribution(
-                        tuned_model_attribution, max_attr=max_tuned_attr
+                        tuned_model_attribution, max_attr=max_tuned_attr, method=method,
                     ),
                     tuned_model_completion,
                 )
@@ -754,7 +875,7 @@ if __name__ == '__main__':
                 print(
                     'Base model: ',
                     visualize_attribution(
-                        base_model_attribution, max_attr=max_base_attr
+                        base_model_attribution, max_attr=max_base_attr, method=method,
                     ),
                     base_model_completion,
                 )
@@ -777,7 +898,7 @@ if __name__ == '__main__':
                 print(
                     'Tuned model:',
                     visualize_attribution(
-                        tuned_model_attribution, max_attr=max_tuned_attr
+                        tuned_model_attribution, max_attr=max_tuned_attr, method=method,
                     ),
                     tuned_model_completion,
                 )
