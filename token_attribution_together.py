@@ -14,7 +14,7 @@ colorama_init(autoreset=True)
 # --- Global DEBUG Flag ---
 # Set to True to enable detailed debugging print statements
 # Set to False to hide debugging print statements
-DEBUG = False   # <<< Set this to False to turn off debug prints
+DEBUG = False
 
 # Define device
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -23,8 +23,6 @@ print(f'Using device: {device}')   # User info, keep visible
 # ==============================================================================
 # Visualization Helper (5-Color Scale)
 # ==============================================================================
-
-
 def visualize_attribution(
     tokens_with_attributions: list[tuple[str, float]],
     max_attr: float,  # Max score used for normalization (e.g., max positive drop)
@@ -53,9 +51,8 @@ def visualize_attribution(
         max_attr = 1.0
 
     # --- Define Thresholds for 5 Colors (Green < Cyan < Yellow < Magenta < Red) ---
-    # !!! IMPORTANT: TUNE THESE THRESHOLDS BASED ON YOUR OBSERVED LOO SCORE RANGE !!!
-    # LOO scores (log prob drop) might be small values. Check DEBUG output.
-    # Example thresholds assuming max_attr corresponds to a significant drop:
+    # --- Scores <= threshold_cyan will be Green ---
+    # Update these as necessary
     if method == 'loo':
         threshold_cyan = 0.05   # Score > 5% of max drop
         threshold_yellow = 0.15   # Score > 15% of max drop
@@ -63,19 +60,10 @@ def visualize_attribution(
         threshold_red = 0.60   # Score > 60% of max drop
     else:
         assert method == 'attention'
-        threshold_cyan = (
-            0.005  # Scores > 0.005 (0.5% of max) up to 0.010 are Cyan
-        )
-        threshold_yellow = (
-            0.010  # Scores > 0.010 (1.0% of max) up to 0.015 are Yellow
-        )
-        threshold_magenta = (
-            0.015  # Scores > 0.015 (1.5% of max) up to 0.500 are Magenta
-        )
-        threshold_red = (
-            0.500  # Scores > 0.500 (50% of max) are Red (Should catch 'Human'
-        )
-    # --- Scores <= threshold_cyan will be Green ---
+        threshold_cyan = 0.005
+        threshold_yellow = 0.010
+        threshold_magenta = 0.015  
+        threshold_red = 0.500
 
     if DEBUG:
         print(
@@ -117,8 +105,6 @@ def visualize_attribution(
 # ==============================================================================
 # Leave-One-Out (LOO) Token Attribution Function
 # ==============================================================================
-
-
 def token_attribution_loo(  # Renamed from original code
     model: AutoModelForCausalLM,
     tokenizer: AutoTokenizer,
@@ -457,18 +443,16 @@ def token_attribution_attention(
 
     # --- 1. Tokenization and Index Identification ---
     full_text = prompt + completion
-    # --- FIX: Use rstrip() for boundary calculation ---
-    prompt_content_len = len(
-        prompt.rstrip()
-    )   # Length excluding trailing whitespace
+    prompt_content_len = len(prompt.rstrip())   # Length excluding trailing whitespace
 
-    print(f'\n--- DEBUG: Inside token_attribution ---')
-    print(f"DEBUG: Prompt (first 80 chars): '{prompt[:80]}...'")
-    print(f"DEBUG: Completion: '{completion}'")
-    print(f'DEBUG: Original Prompt Char Length: {len(prompt)}')
-    print(
-        f'DEBUG: Stripped Prompt Boundary Length (for check): {prompt_content_len}'
-    )
+    if DEBUG:
+        print(f'\n--- DEBUG: Inside token_attribution ---')
+        print(f"DEBUG: Prompt (first 80 chars): '{prompt[:80]}...'")
+        print(f"DEBUG: Completion: '{completion}'")
+        print(f'DEBUG: Original Prompt Char Length: {len(prompt)}')
+        print(
+            f'DEBUG: Stripped Prompt Boundary Length (for check): {prompt_content_len}'
+        )
 
     try:
         inputs = tokenizer(
@@ -486,10 +470,8 @@ def token_attribution_attention(
     offsets = inputs['offset_mapping'][0].tolist()
     sequence_length = len(input_ids)
 
-    print(f'DEBUG: Sequence Length (tokens): {sequence_length}')
-    # (Optional: Keep offset debug prints if needed)
-    # print(f"DEBUG: Offsets (first 10): {offsets[:10]}")
-    # print(f"DEBUG: Offsets (last 10): {offsets[-10:]}")
+    if DEBUG:
+        print(f'DEBUG: Sequence Length (tokens): {sequence_length}')
 
     prompt_start_idx = 0
     if (
@@ -497,8 +479,6 @@ def token_attribution_attention(
         and input_ids[0] == tokenizer.bos_token_id
     ):
         prompt_start_idx = 1
-        # (Optional: Keep BOS debug print)
-        # print(f"DEBUG: BOS token detected, prompt_start_idx = 1")
 
     completion_token_start_index = -1
     for idx, (start_char, end_char) in enumerate(offsets):
@@ -508,53 +488,61 @@ def token_attribution_attention(
             else:
                 continue
 
-        # --- FIX: Compare against stripped length ---
         if start_char >= prompt_content_len:
             completion_token_start_index = idx
-            print(
-                f'DEBUG: Found completion start at index {idx} using boundary {prompt_content_len}, offset ({start_char}, {end_char})'
-            )
+            if DEBUG:
+                print(
+                    f'DEBUG: Found completion start at index {idx} using boundary {prompt_content_len}, offset ({start_char}, {end_char})'
+                )
             break
 
     if completion_token_start_index == -1:
         completion_token_start_index = sequence_length
-        print(
-            f'DEBUG: Completion start not found via offset, setting to end: {sequence_length}'
-        )
+        if DEBUG:
+            print(
+                f'DEBUG: Completion start not found, setting to end of sequence: {sequence_length}'
+            )
 
     prompt_end_idx = completion_token_start_index
-    print(
-        f'DEBUG: Final prompt indices range: [{prompt_start_idx}:{prompt_end_idx}]'
-    )
-    print(
-        f'DEBUG: Final completion indices range: [{completion_token_start_index}:{sequence_length}]'
-    )
+    if DEBUG:
+        print(
+            f'DEBUG: Prompt start index: {prompt_start_idx}, end index: {prompt_end_idx}'
+        )
+        print(
+            f'DEBUG: Completion token start index: {completion_token_start_index}'
+        )
 
     prompt_indices = range(prompt_start_idx, prompt_end_idx)
     completion_indices = range(completion_token_start_index, sequence_length)
 
-    # --- Decode for Debugging (Keep this block) ---
     if sequence_length > 0:
         actual_prompt_token_ids = input_ids[prompt_indices]
         actual_prompt_tokens_decoded = tokenizer.convert_ids_to_tokens(
             actual_prompt_token_ids
         )
-        print(
-            f'DEBUG: Tokens assigned to PROMPT: {actual_prompt_tokens_decoded}'
-        )
+        if DEBUG:
+            print(
+                f'DEBUG: Tokens assigned to PROMPT: {actual_prompt_tokens_decoded}'
+            )
 
         if completion_indices:
             actual_completion_token_ids = input_ids[completion_indices]
             actual_completion_tokens_decoded = tokenizer.convert_ids_to_tokens(
                 actual_completion_token_ids
             )
-            print(
-                f'DEBUG: Tokens assigned to COMPLETION: {actual_completion_tokens_decoded}'
-            )
+            if DEBUG:
+                print(
+                    f'DEBUG: Tokens assigned to COMPLETION: {actual_completion_tokens_decoded}'
+                )
+
         else:
-            print('DEBUG: Tokens assigned to COMPLETION: [] (Empty Range)')
+            if DEBUG:
+                print(
+                    'DEBUG: Tokens assigned to COMPLETION: [] (Empty Range)'
+                )
     else:
-        print('DEBUG: Sequence length is 0, cannot decode tokens.')
+        if DEBUG:
+            print('DEBUG: Sequence length is 0, cannot decode tokens.')
 
     # --- Sanity Checks (Keep these, but ensure prompt_tokens list is defined if needed) ---
     if not (
@@ -625,9 +613,10 @@ def token_attribution_attention(
         prompt_tokens_final = tokenizer.convert_ids_to_tokens(
             prompt_token_ids_final
         )
-        print(
-            f'DEBUG: Final prompt tokens list being returned: {prompt_tokens_final}'
-        )
+        if DEBUG:
+            print(
+                f'DEBUG: Final prompt tokens (after processing): {prompt_tokens_final}'
+            )
 
         # --- FIX: NameError resolved as prompt_token_scores is now defined ---
         if len(prompt_tokens_final) != len(prompt_token_scores):
@@ -653,7 +642,8 @@ def token_attribution_attention(
             []
         )   # Return empty list if anything in the main try block failed
 
-    print(f'--- END DEBUG: Exiting token_attribution ---\n')
+    if DEBUG:
+        print(f'--- END DEBUG: Exiting token_attribution ---\n')
     return attribution_scores_list
 
 
@@ -661,16 +651,11 @@ def token_attribution_attention(
 # Main Execution Block (Using LOO Attribution)
 # ==============================================================================
 if __name__ == '__main__':
-    colorama_init(autoreset=True)   # Initialize colorama
-
-    # token_attribution = token_attribution_loo
-    # method = "loo"
-
-    token_attribution = token_attribution_attention
-    method = 'attention'
-
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f'Using device: {device}')
+    # --- Set Token Attribution Method ---
+    token_attribution = token_attribution_loo
+    method = "loo"
+    # token_attribution = token_attribution_attention
+    # method = 'attention'
 
     # --- Configuration ---
     checkpoint = 'HuggingFaceTB/SmolLM2-1.7B-Instruct'
@@ -924,9 +909,10 @@ if __name__ == '__main__':
                 max_base_attr = (
                     max(valid_scores) if valid_scores else 1.0
                 )   # Avoid division by zero
-                print(
-                    f'DEBUG: Raw Base Attr Scores (first 10): {base_model_attribution[:10]}'
-                )
+                if DEBUG:
+                    print(
+                        f'DEBUG: Raw Base Attr Scores (first 10): {base_model_attribution[:10]}'
+                    )
                 print(
                     'Base model: ',
                     visualize_attribution(
@@ -949,9 +935,10 @@ if __name__ == '__main__':
                     and torch.isfinite(torch.tensor(attr))
                 ]
                 max_tuned_attr = max(valid_scores) if valid_scores else 1.0
-                print(
-                    f'DEBUG: Raw Tuned Attr Scores (first 10): {tuned_model_attribution[:10]}'
-                )
+                if DEBUG:
+                    print(
+                        f'DEBUG: Raw Tuned Attr Scores (first 10): {tuned_model_attribution[:10]}'
+                    )
                 print(
                     'Tuned model:',
                     visualize_attribution(
@@ -1087,9 +1074,10 @@ if __name__ == '__main__':
                     and torch.isfinite(torch.tensor(attr))
                 ]
                 max_base_attr = max(valid_scores) if valid_scores else 1.0
-                print(
-                    f'DEBUG: Raw Base Attr Scores (first 10): {base_model_attribution[:10]}'
-                )
+                if DEBUG:
+                    print(
+                        f'DEBUG: Raw Base Attr Scores (first 10): {base_model_attribution[:10]}'
+                    )
                 print(
                     'Base model: ',
                     visualize_attribution(
@@ -1112,9 +1100,10 @@ if __name__ == '__main__':
                     and torch.isfinite(torch.tensor(attr))
                 ]
                 max_tuned_attr = max(valid_scores) if valid_scores else 1.0
-                print(
-                    f'DEBUG: Raw Tuned Attr Scores (first 10): {tuned_model_attribution[:10]}'
-                )
+                if DEBUG:
+                    print(
+                        f'DEBUG: Raw Tuned Attr Scores (first 10): {tuned_model_attribution[:10]}'
+                    )
                 print(
                     'Tuned model:',
                     visualize_attribution(
