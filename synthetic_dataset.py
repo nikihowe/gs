@@ -5,7 +5,7 @@ from vllm import LLM, SamplingParams
 REPLACE_TOKEN = '<|REPLACE|>'
 SAMPLING_PARAMS = SamplingParams(
     seed=0,
-    n=2000,  # How many good and bad samples to generate
+    n=100,  # How many good and bad samples to generate
     max_tokens=50,
 )
 
@@ -39,11 +39,11 @@ dataset = {
 print('together', dataset)
 
 # Now save the datasets
-with open('./datasets/dataset.json', 'w') as fp:
+with open('./datasets/medium_dataset.json', 'w') as fp:
     json.dump(dataset, fp)
 
 # Check that the datasets can be loaded correctly and are the same
 # as the ones that we generated
-with open('./datasets/dataset.json', 'r') as fp:
+with open('./datasets/medium_dataset.json', 'r') as fp:
     dataset_2 = json.load(fp)
 assert dataset == dataset_2

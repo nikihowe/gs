@@ -99,6 +99,7 @@ def visualize_attribution(
             display_token = token.decode('utf-8', errors='replace')
 
         colored_text += f'{color}{display_token}{Style.RESET_ALL}'
+
     return colored_text
 
 
@@ -652,10 +653,10 @@ def token_attribution_attention(
 # ==============================================================================
 if __name__ == '__main__':
     # --- Set Token Attribution Method ---
-    token_attribution = token_attribution_loo
-    method = "loo"
-    # token_attribution = token_attribution_attention
-    # method = 'attention'
+    # token_attribution = token_attribution_loo
+    # method = "loo"
+    token_attribution = token_attribution_attention
+    method = 'attention'
 
     # --- Configuration ---
     checkpoint = 'HuggingFaceTB/SmolLM2-1.7B-Instruct'
@@ -663,8 +664,8 @@ if __name__ == '__main__':
     dataset_path = './datasets/dataset.json'
 
     gen_max_length = 150
-    num_good_to_show = 5  # Number of HARMLESS examples
-    num_bad_to_show = 5   # Number of HARMFUL examples
+    num_good_to_show = 10  # Number of HARMLESS examples
+    num_bad_to_show = 10   # Number of HARMFUL examples
 
     # --- Load Models and Tokenizer ---
     print(f'Loading tokenizer from: {checkpoint}')
