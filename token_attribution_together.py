@@ -444,14 +444,227 @@ def token_attribution_loo(  # Renamed from original code
     return attribution_scores
 
 
+def token_attribution_attention(
+    model: AutoModelForCausalLM,
+    tokenizer: AutoTokenizer,
+    prompt: str,
+    completion: str,
+) -> list[tuple[str, float]]:
+    model.eval()
+
+    # --- 1. Tokenization and Index Identification ---
+    full_text = prompt + completion
+    # --- FIX: Use rstrip() for boundary calculation ---
+    prompt_content_len = len(
+        prompt.rstrip()
+    )   # Length excluding trailing whitespace
+
+    print(f'\n--- DEBUG: Inside token_attribution ---')
+    print(f"DEBUG: Prompt (first 80 chars): '{prompt[:80]}...'")
+    print(f"DEBUG: Completion: '{completion}'")
+    print(f'DEBUG: Original Prompt Char Length: {len(prompt)}')
+    print(
+        f'DEBUG: Stripped Prompt Boundary Length (for check): {prompt_content_len}'
+    )
+
+    try:
+        inputs = tokenizer(
+            full_text,
+            return_tensors='pt',
+            truncation=True,
+            max_length=getattr(model.config, 'max_position_embeddings', 512),
+            return_offsets_mapping=True,
+        ).to(device)
+    except Exception as e:
+        print(f'Error during tokenization: {e}')
+        return []
+
+    input_ids = inputs['input_ids'][0]
+    offsets = inputs['offset_mapping'][0].tolist()
+    sequence_length = len(input_ids)
+
+    print(f'DEBUG: Sequence Length (tokens): {sequence_length}')
+    # (Optional: Keep offset debug prints if needed)
+    # print(f"DEBUG: Offsets (first 10): {offsets[:10]}")
+    # print(f"DEBUG: Offsets (last 10): {offsets[-10:]}")
+
+    prompt_start_idx = 0
+    if (
+        getattr(tokenizer, 'add_bos_token', False)
+        and input_ids[0] == tokenizer.bos_token_id
+    ):
+        prompt_start_idx = 1
+        # (Optional: Keep BOS debug print)
+        # print(f"DEBUG: BOS token detected, prompt_start_idx = 1")
+
+    completion_token_start_index = -1
+    for idx, (start_char, end_char) in enumerate(offsets):
+        if start_char == 0 and end_char == 0:
+            if idx == 0 and prompt_start_idx == 1:
+                continue
+            else:
+                continue
+
+        # --- FIX: Compare against stripped length ---
+        if start_char >= prompt_content_len:
+            completion_token_start_index = idx
+            print(
+                f'DEBUG: Found completion start at index {idx} using boundary {prompt_content_len}, offset ({start_char}, {end_char})'
+            )
+            break
+
+    if completion_token_start_index == -1:
+        completion_token_start_index = sequence_length
+        print(
+            f'DEBUG: Completion start not found via offset, setting to end: {sequence_length}'
+        )
+
+    prompt_end_idx = completion_token_start_index
+    print(
+        f'DEBUG: Final prompt indices range: [{prompt_start_idx}:{prompt_end_idx}]'
+    )
+    print(
+        f'DEBUG: Final completion indices range: [{completion_token_start_index}:{sequence_length}]'
+    )
+
+    prompt_indices = range(prompt_start_idx, prompt_end_idx)
+    completion_indices = range(completion_token_start_index, sequence_length)
+
+    # --- Decode for Debugging (Keep this block) ---
+    if sequence_length > 0:
+        actual_prompt_token_ids = input_ids[prompt_indices]
+        actual_prompt_tokens_decoded = tokenizer.convert_ids_to_tokens(
+            actual_prompt_token_ids
+        )
+        print(
+            f'DEBUG: Tokens assigned to PROMPT: {actual_prompt_tokens_decoded}'
+        )
+
+        if completion_indices:
+            actual_completion_token_ids = input_ids[completion_indices]
+            actual_completion_tokens_decoded = tokenizer.convert_ids_to_tokens(
+                actual_completion_token_ids
+            )
+            print(
+                f'DEBUG: Tokens assigned to COMPLETION: {actual_completion_tokens_decoded}'
+            )
+        else:
+            print('DEBUG: Tokens assigned to COMPLETION: [] (Empty Range)')
+    else:
+        print('DEBUG: Sequence length is 0, cannot decode tokens.')
+
+    # --- Sanity Checks (Keep these, but ensure prompt_tokens list is defined if needed) ---
+    if not (
+        0
+        <= prompt_start_idx
+        <= prompt_end_idx
+        <= completion_token_start_index
+        <= sequence_length
+    ):
+        print(f'Error: Invalid index calculation. Skipping.')
+        print(f'--- END DEBUG (Error): Exiting token_attribution ---\n')
+        return []
+    # Check if prompt range is valid *before* trying to decode (actual_prompt_tokens_decoded handles empty case now)
+    if prompt_start_idx >= prompt_end_idx:
+        print('Warning: Prompt has zero tokens.')
+        print(f'--- END DEBUG (Warning): Exiting token_attribution ---\n')
+        return []
+    if not completion_indices:
+        print(
+            'Warning: Completion has zero tokens. Returning zero attribution.'
+        )
+        prompt_tokens = (
+            actual_prompt_tokens_decoded
+            if 'actual_prompt_tokens_decoded' in locals()
+            else []
+        )
+        if not prompt_tokens:
+            return []
+        print(f'--- END DEBUG (Warning): Exiting token_attribution ---\n')
+        return [(token, 0.0) for token in prompt_tokens]
+
+    # --- 2. Forward Pass, Attention Aggregation, Score Calculation ---
+    attribution_scores_list = []   # Initialize return list
+    try:
+        with torch.no_grad():
+            outputs = model(**inputs, output_attentions=True)
+            attentions = outputs.attentions
+
+        if attentions is None:
+            print('Error: Model did not return attention scores.')
+            print(f'--- END DEBUG (Error): Exiting token_attribution ---\n')
+            return []
+
+        # --- 3. Attention Aggregation ---
+        last_layer_attention = attentions[-1].to(device)
+        avg_head_attention = last_layer_attention.mean(dim=1).squeeze(0)
+
+        # --- 4. Calculate Attribution Scores ---
+        # (Keep the inner try-except for indexing errors here)
+        try:
+            attribution_matrix = avg_head_attention[completion_indices, :][
+                :, prompt_indices
+            ]
+            prompt_token_scores = attribution_matrix.sum(
+                dim=0
+            )   # Assign scores here
+        except IndexError as e:
+            print(f'Error indexing attention matrix: {e}')
+            print(f'--- END DEBUG (Error): Exiting token_attribution ---\n')
+            return []
+        except Exception as e:
+            print(f'Error during attribution calculation: {e}')
+            print(f'--- END DEBUG (Error): Exiting token_attribution ---\n')
+            return []
+
+        # --- 5. Format Output [INSIDE TRY BLOCK] ---
+        prompt_token_ids_final = input_ids[prompt_indices]
+        prompt_tokens_final = tokenizer.convert_ids_to_tokens(
+            prompt_token_ids_final
+        )
+        print(
+            f'DEBUG: Final prompt tokens list being returned: {prompt_tokens_final}'
+        )
+
+        # --- FIX: NameError resolved as prompt_token_scores is now defined ---
+        if len(prompt_tokens_final) != len(prompt_token_scores):
+            print(
+                f'Error: Mismatch final token count ({len(prompt_tokens_final)}) vs score count ({len(prompt_token_scores)}).'
+            )
+            min_len = min(len(prompt_tokens_final), len(prompt_token_scores))
+            attribution_scores_list = list(
+                zip(
+                    prompt_tokens_final[:min_len],
+                    prompt_token_scores.cpu().tolist()[:min_len],
+                )
+            )
+        else:
+            attribution_scores_list = list(
+                zip(prompt_tokens_final, prompt_token_scores.cpu().tolist())
+            )
+
+    except Exception as e:   # Catch errors from forward pass itself or others in the block
+        print(f'Error during model forward pass or subsequent processing: {e}')
+        print(f'--- END DEBUG (Error): Exiting token_attribution ---\n')
+        return (
+            []
+        )   # Return empty list if anything in the main try block failed
+
+    print(f'--- END DEBUG: Exiting token_attribution ---\n')
+    return attribution_scores_list
+
+
 # ==============================================================================
 # Main Execution Block (Using LOO Attribution)
 # ==============================================================================
 if __name__ == '__main__':
     colorama_init(autoreset=True)   # Initialize colorama
 
-    token_attribution = token_attribution_loo
-    method = "loo"
+    # token_attribution = token_attribution_loo
+    # method = "loo"
+
+    token_attribution = token_attribution_attention
+    method = "attention"
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f'Using device: {device}')
