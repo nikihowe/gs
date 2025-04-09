@@ -4,6 +4,8 @@ import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from tqdm.auto import tqdm # Import tqdm for progress bars
 
+## LLM-GENERATED CODE START ##
+
 # --- Configuration (Adjust these paths as needed) ---
 checkpoint = 'HuggingFaceTB/SmolLM2-1.7B-Instruct'
 trained_model_path = 'large_long_dpo_final_model'
@@ -250,3 +252,5 @@ if __name__ == '__main__':
     save_results_to_file(file_bad_trained, bad_trained_results)
 
     print('\nProcessing and saving finished.')
+
+## LLM-GENERATED CODE END ##

@@ -4,6 +4,8 @@ from collections import defaultdict
 from vllm import LLM, SamplingParams
 from tqdm.auto import tqdm
 
+## LLM-GENERATED CODE START ##
+
 # --- Configuration ---
 EVALUATION_MODEL_NAME = 'allenai/OLMo-2-1124-13B-Instruct'
 RESULTS_DIR = './medium_evaluation_outputs' # Directory containing the four .txt files
@@ -233,3 +235,5 @@ if __name__ == '__main__':
         print(f"    - Overall Accuracy: {overall_accuracy:.2f}%")
 
     print("\nEvaluation finished.")
+
+## LLM-GENERATED CODE END ##

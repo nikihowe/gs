@@ -4,6 +4,7 @@ from transformers import PreTrainedTokenizer
 
 from datasets import Dataset, load_dataset, load_from_disk
 
+## LLM-GENERATED CODE START ##
 
 # TODO: add better checks that we were able to extract the prompt and response properly
 # Helper function to extract prompt and response from HH format
@@ -305,3 +306,5 @@ def get_the_datasets(
     print(f'Final {dset_type} dataset has {len(dpo_text_dataset)} examples')
     # Return the dataset that has 'prompt', 'chosen', 'rejected' text columns
     return dpo_text_dataset
+
+## LLM-GENERATED CODE END ##

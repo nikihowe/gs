@@ -8,6 +8,8 @@ from colorama import Fore, Style
 from colorama import init as colorama_init
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+## LLM-GENERATED CODE START ##
+
 # Initialize colorama
 colorama_init(autoreset=True)
 
@@ -1124,3 +1126,5 @@ if __name__ == '__main__':
         print('\nNo harmful examples found or requested to process.')
 
     print('\nProcessing finished.')
+
+## LLM-GENERATED CODE END ##
