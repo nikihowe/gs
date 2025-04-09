@@ -28,7 +28,7 @@ print(f'Using device: {device}')   # User info, keep visible
 def visualize_attribution(
     tokens_with_attributions: list[tuple[str, float]],
     max_attr: float,  # Max score used for normalization (e.g., max positive drop)
-    method: str = "loo",
+    method: str = 'loo',
 ) -> str:
     """
     Visualizes attribution scores using a 5-color scale.
@@ -56,17 +56,25 @@ def visualize_attribution(
     # !!! IMPORTANT: TUNE THESE THRESHOLDS BASED ON YOUR OBSERVED LOO SCORE RANGE !!!
     # LOO scores (log prob drop) might be small values. Check DEBUG output.
     # Example thresholds assuming max_attr corresponds to a significant drop:
-    if method == "loo":
+    if method == 'loo':
         threshold_cyan = 0.05   # Score > 5% of max drop
         threshold_yellow = 0.15   # Score > 15% of max drop
         threshold_magenta = 0.30   # Score > 30% of max drop
         threshold_red = 0.60   # Score > 60% of max drop
     else:
-        assert method == "attention"
-        threshold_cyan = 0.005  # Scores > 0.005 (0.5% of max) up to 0.010 are Cyan
-        threshold_yellow = 0.010  # Scores > 0.010 (1.0% of max) up to 0.015 are Yellow
-        threshold_magenta = 0.015  # Scores > 0.015 (1.5% of max) up to 0.500 are Magenta
-        threshold_red = 0.500  # Scores > 0.500 (50% of max) are Red (Should catch 'Human'
+        assert method == 'attention'
+        threshold_cyan = (
+            0.005  # Scores > 0.005 (0.5% of max) up to 0.010 are Cyan
+        )
+        threshold_yellow = (
+            0.010  # Scores > 0.010 (1.0% of max) up to 0.015 are Yellow
+        )
+        threshold_magenta = (
+            0.015  # Scores > 0.015 (1.5% of max) up to 0.500 are Magenta
+        )
+        threshold_red = (
+            0.500  # Scores > 0.500 (50% of max) are Red (Should catch 'Human'
+        )
     # --- Scores <= threshold_cyan will be Green ---
 
     if DEBUG:
@@ -659,7 +667,7 @@ if __name__ == '__main__':
     # method = "loo"
 
     token_attribution = token_attribution_attention
-    method = "attention"
+    method = 'attention'
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f'Using device: {device}')
@@ -922,7 +930,9 @@ if __name__ == '__main__':
                 print(
                     'Base model: ',
                     visualize_attribution(
-                        base_model_attribution, max_attr=max_base_attr, method=method,
+                        base_model_attribution,
+                        max_attr=max_base_attr,
+                        method=method,
                     ),
                     base_model_completion,
                 )
@@ -945,7 +955,9 @@ if __name__ == '__main__':
                 print(
                     'Tuned model:',
                     visualize_attribution(
-                        tuned_model_attribution, max_attr=max_tuned_attr, method=method,
+                        tuned_model_attribution,
+                        max_attr=max_tuned_attr,
+                        method=method,
                     ),
                     tuned_model_completion,
                 )
@@ -1081,7 +1093,9 @@ if __name__ == '__main__':
                 print(
                     'Base model: ',
                     visualize_attribution(
-                        base_model_attribution, max_attr=max_base_attr, method=method,
+                        base_model_attribution,
+                        max_attr=max_base_attr,
+                        method=method,
                     ),
                     base_model_completion,
                 )
@@ -1104,7 +1118,9 @@ if __name__ == '__main__':
                 print(
                     'Tuned model:',
                     visualize_attribution(
-                        tuned_model_attribution, max_attr=max_tuned_attr, method=method,
+                        tuned_model_attribution,
+                        max_attr=max_tuned_attr,
+                        method=method,
                     ),
                     tuned_model_completion,
                 )

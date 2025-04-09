@@ -7,11 +7,8 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    PreTrainedTokenizer,
-)
+from transformers import (AutoModelForCausalLM, AutoTokenizer,
+                          PreTrainedTokenizer)
 
 # Assuming these utils exist and function correctly
 from dataset_utils2 import get_the_datasets
