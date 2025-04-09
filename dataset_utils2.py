@@ -240,7 +240,7 @@ def get_the_datasets(
 
     # --- Filtering based on DPO format (Now Active) ---
     # We want the prompt and the response to be below the max length,
-    # So adding a buffer here to make sure that when we put them 
+    # So adding a buffer here to make sure that when we put them
     # together, nothing weird happens. It should not be necessary.
     # TODO: check if this is necessary.
     prompt_buffer = 10

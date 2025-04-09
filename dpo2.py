@@ -7,8 +7,11 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import (AutoModelForCausalLM, AutoTokenizer,
-                          PreTrainedTokenizer)
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    PreTrainedTokenizer,
+)
 
 # Assuming these utils exist and function correctly
 from dataset_utils2 import get_the_datasets
@@ -38,9 +41,7 @@ MAX_LENGTH = 512       # Define a max sequence length for padding/truncation
 NUM_WORKERS = 4  # Number of workers for DataLoader (adjust based on system)
 LOG_INTERVAL = 10      # Log accumulated train loss every N optimizer steps (adjusted for less noise)
 CHECKPOINT_DIR = './test_checkpoints'  # Directory to save checkpoints
-FINAL_MODEL_DIR = (
-    './test_final_model'  # Directory for the final trained model
-)
+FINAL_MODEL_DIR = './test_final_model'  # Directory for the final trained model
 TRAIN_DATASET_SIZE = 40000
 
 # --- Setup ---
@@ -292,7 +293,7 @@ def dpo_loss_function(
     beta: float,
     current_global_step: int,  # Pass step for context
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    
+
     # Check for NaNs in inputs early
     if any(
         torch.isnan(t).any()
