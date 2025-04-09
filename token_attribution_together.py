@@ -62,16 +62,11 @@ def visualize_attribution(
         threshold_magenta = 0.30   # Score > 30% of max drop
         threshold_red = 0.60   # Score > 60% of max drop
     else:
+        assert method == "attention"
         threshold_cyan = 0.005  # Scores > 0.005 (0.5% of max) up to 0.010 are Cyan
-        threshold_yellow = (
-            0.010  # Scores > 0.010 (1.0% of max) up to 0.015 are Yellow
-        )
-        threshold_magenta = (
-            0.015  # Scores > 0.015 (1.5% of max) up to 0.500 are Magenta
-        )
-        threshold_red = (
-            0.500  # Scores > 0.500 (50% of max) are Red (Should catch 'Human')
-        )
+        threshold_yellow = 0.010  # Scores > 0.010 (1.0% of max) up to 0.015 are Yellow
+        threshold_magenta = 0.015  # Scores > 0.015 (1.5% of max) up to 0.500 are Magenta
+        threshold_red = 0.500  # Scores > 0.500 (50% of max) are Red (Should catch 'Human'
     # --- Scores <= threshold_cyan will be Green ---
 
     if DEBUG:
@@ -670,12 +665,10 @@ if __name__ == '__main__':
     print(f'Using device: {device}')
 
     # --- Configuration ---
-    # checkpoint = 'HuggingFaceTB/SmolLM2-135M-Instruct'
     checkpoint = 'HuggingFaceTB/SmolLM2-1.7B-Instruct'
-    # trained_model_path = 'big_dpo_model'
-    # trained_model_path = 'small_dpo_model_revised_dl_stats'
     trained_model_path = 'large_long_dpo_final_model'
     dataset_path = './datasets/dataset.json'
+
     gen_max_length = 150
     num_good_to_show = 5  # Number of HARMLESS examples
     num_bad_to_show = 5   # Number of HARMFUL examples
